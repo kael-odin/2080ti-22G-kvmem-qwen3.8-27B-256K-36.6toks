@@ -1,0 +1,36 @@
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index 146794d77..ddec0810a 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -1754,9 +1754,13 @@ void ggml_cuda_flash_attn_ext_streamed(
+         }
+     }
+ 
++    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
++    const bool use_turing_mma_prefill = GGML_CUDA_CC_IS_NVIDIA(cc) &&
++        ggml_cuda_highest_compiled_arch(cc) == GGML_CUDA_CC_TURING;
+     const bool use_mma_prefill = !convert_to_f16 &&
+-        Q->ne[1] > 1 && Q->ne[0] == 256 && V->ne[0] == 256 &&
+-        mask != nullptr && Q->ne[2] % K->ne[2] == 0 && Q->ne[2]/K->ne[2] <= 8;
++        Q->ne[1] > 1 && (!use_turing_mma_prefill || Q->ne[1] > 32) &&
++        Q->ne[0] == 256 && V->ne[0] == 256 && mask != nullptr &&
++        Q->ne[2] % K->ne[2] == 0 && Q->ne[2]/K->ne[2] <= 8;
+     const int partial_count = use_mma_prefill ? 1 : kv_stream_parts_per_chunk();
+     GGML_ASSERT(partial_count > 0 && partial_count <= KV_STREAM_MAX_PARTS_PER_CHUNK);
+     GGML_ASSERT(Q->ne[1] > 0 && nrows % Q->ne[1] == 0);
+@@ -2084,8 +2088,13 @@ void ggml_cuda_flash_attn_ext_streamed(
+             query_dst.src[3] = query_mask_ptr;
+ 
+             if (use_mma_prefill) {
+-                ggml_cuda_flash_attn_ext_mma_f16_partial_case<256, 256, 8, 8>(
+-                    ctx, &query_dst, parts.ptr, meta.ptr);
++                if (use_turing_mma_prefill) {
++                    ggml_cuda_flash_attn_ext_mma_f16_partial_case<256, 256, 4, 8>(
++                        ctx, &query_dst, parts.ptr, meta.ptr);
++                } else {
++                    ggml_cuda_flash_attn_ext_mma_f16_partial_case<256, 256, 8, 8>(
++                        ctx, &query_dst, parts.ptr, meta.ptr);
++                }
+                 if (resident_cache != nullptr) {
+                     ++resident_cache->stats.mma_prefill_attention_spans;
+                 }

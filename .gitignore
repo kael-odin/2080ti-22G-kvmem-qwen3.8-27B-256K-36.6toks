@@ -1,0 +1,14 @@
+bin/
+build/
+upstream/
+validation-runs/
+models/
+*.gguf
+*.dll
+*.exe
+*.log
+*.pid
+__pycache__/
+*.pyc
+.vscode/
+.idea/

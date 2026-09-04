@@ -1,0 +1,6 @@
+* text=auto
+*.bat text eol=crlf
+*.py text eol=lf
+*.patch text eol=lf whitespace=-blank-at-eol
+*.md text eol=lf
+*.csv text eol=lf

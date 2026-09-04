@@ -1,0 +1,17 @@
+run_id,model,context,kv,mode,stage_mib,batch,ubatch,mtp,vision_or_mmproj,prompt_tokens,prefill_tps,decode_tps,mtp_accepted,mtp_drafted,exact_pass,peak_vram_mib,min_free_vram_mib,min_free_ram_mib,notes
+sm75-crash-before-fix,turbo-iq4-xs,65536,k4v4,adaptive,1024,512,512,true,false,57875,,,0,0,false,17611,4620,12026,CUDA invalid argument at Turing partial MMA dispatch
+sm75-after-first-fix,turbo-iq4-xs,65536,k4v4,adaptive,1024,512,512,true,false,64512,484.59,17.01,12,12,true,17647,4584,19204,large prefill stable
+sm75-after-mtp-fix,turbo-iq4-xs,65536,k4v4,adaptive,1536,512,512,true,false,64512,504.87,33.33,12,12,true,18384,3847,17203,small MTP batches use vector partial
+turbo-128k-fixed,turbo-iq4-xs,131072,k4v4,fixed,0,512,512,true,false,130048,338.66,24.53,12,12,true,19834,2397,16456,
+turbo-128k-adaptive,turbo-iq4-xs,131072,k4v4,adaptive,1536,512,512,true,false,130048,366.00,10.33,12,12,true,18969,3262,15017,
+turbo-260k-adaptive,turbo-iq4-xs,262144,k4v4,adaptive,1024,512,512,true,true,260096,197.03,3.96,12,12,true,21092,1139,10838,mmproj loaded
+gsq-vision-8k,gsq-rco-iq3-s,8192,k4v4,fixed,0,512,512,true,true,1124,305.07,36.99,9,10,true,15037,7194,19308,vision oracle passed
+gsq-64k-k4v4,gsq-rco-iq3-s,65536,k4v4,fixed,0,512,512,true,true,64512,393.29,25.31,12,12,true,16180,6051,16927,
+gsq-64k-k8v4,gsq-rco-iq3-s,65536,k8v4,fixed,0,512,512,true,true,64512,382.50,25.79,12,12,true,16858,5373,17027,
+gsq-64k-k8v8,gsq-rco-iq3-s,65536,k8v8,fixed,0,512,512,true,true,64512,392.60,26.70,12,12,true,17247,4984,17014,
+gsq-64k-k8v4-adaptive,gsq-rco-iq3-s,65536,k8v4,adaptive,1024,512,512,true,true,64512,402.70,12.88,12,12,true,15823,6408,15206,
+gsq-64k-k8v8-adaptive,gsq-rco-iq3-s,65536,k8v8,adaptive,1024,512,512,true,true,64512,398.44,10.78,12,12,true,15746,6485,15047,
+gsq-64k-k8v8-ub128,gsq-rco-iq3-s,65536,k8v8,fixed,0,512,128,true,true,64512,330.87,27.09,12,12,true,17004,5227,15859,
+gsq-170k-k8v8-load,gsq-rco-iq3-s,174080,k8v8,fixed,0,512,128,true,true,,,,,,true,21019,1212,18120,load-only
+gsq-192k-k8v8-load,gsq-rco-iq3-s,196608,k8v8,fixed,0,512,128,true,true,,,,,,false,22035,196,17953,load-only below safety threshold
+gsq-262k-k4v4,gsq-rco-iq3-s,262144,k4v4,fixed,0,512,128,true,true,260096,182.20,16.75,12,12,true,21334,897,14266,mmproj loaded; peak below preferred 1 GiB free
