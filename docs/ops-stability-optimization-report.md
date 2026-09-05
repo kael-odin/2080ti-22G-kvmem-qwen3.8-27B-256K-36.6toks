@@ -183,6 +183,30 @@ min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0
 - 若确认 copy engine 饱和，才针对 page 合并、预取距离、ring slots 和 pinned host allocation 调参；若 copy 不饱和而 GPU attention 饱和，则扩大 pool 也不会继续解决 decode。
 - attention sink / 非原生 sliding window 仍不进入生产：Qwen3.8 的 dense layers 与 recurrent state 共同承担上下文语义，截断历史必须用真实代码 agent 质量集验证。
 
+### 插桩后的首次真实搬运测量（2026-09-06，trace-experiment 分支）
+
+在隔离分支 `trace-experiment` 上给 `LLAMA_KV_STREAM_TRACE` 行追加了累计计数（resident hits/miss、streamed 页数、host→device 累计 MiB、异步上传数、compute 等待、slot 复用、跨层预取），编译到独立的 `bin-b10816-trace`（build 10879），对生产 `bin-b10816` 零改动。计数为单调累计值，两个时间点之差即该区间的真实搬运量。
+
+同一 135,088-token 跨边界请求（UD-IQ4_XS，q5_1 KV，3,072 MiB 池，MTP+视觉，输出 200 token，decode 10.0 t/s，prefill 199.4 t/s）：
+
+| 计数 | prefill 尾（resident 511）| 最终（resident 510）| 增量 |
+|---|---:|---:|---|
+| streamed 页 | 4,624 | 8,064 | +3,440 页 |
+| h2d 累计 | 4,802 MiB | 12,204 MiB | **+7,402 MiB** |
+| uploads | 4,624 | 12,688 | +8,064 |
+| compute waits | 4,624 | 12,688 | +8,064 |
+| slot reuses | 4,608 | 12,656 | +8,048 |
+| 跨层预取 xfetch | 0 | 0 | **0** |
+| deadline samples/misses | 0 / 0 | 0 / 0 | 0 / 0 |
+
+**每页实测 0.583 MiB**（q5_1 K+V 256-token 页，与理论一致），每次 upload 恰好对应一次 compute wait（比率 1.00）。据此得出的瓶颈判断：
+
+1. **不是 PCIe 带宽**。decode 每输出 token 约 61 页 ≈ 36 MiB，@10 t/s 仅 ~0.35 GiB/s，远低于 PCIe 3.0 x16 的 ~13 GiB/s。
+2. **是 copy/compute 零重叠**。waits==uploads 意味着每次页上传 compute 都在同步等待；跨层预取（xfetch）一次都没发生，deadline 采样也从未激活。
+3. **可操作方向**（按预期收益排序）：查清为何 lookahead 没有找到可预取页（当前层之后没有 pending 请求，或 producer 依赖把 eligible 判断全部挡住）；核对 ring 深度 32 与每层 streamed 页 19 的配比是否让 ring 在一层内转不开；只有确认重叠修复后，decode 才有望显著回升，届时再谈扩大 pool。
+
+这次测量同时说明：此前的 `samples=0/misses=0/copy busy=0.0%` 不是"没有搬运"，而是请求级聚合缺失；插桩后同一现象背后的真实数据完全不同。
+
 ---
 
 ## 九、当前状态
