@@ -47,7 +47,7 @@
 |---|---|---|---|---|
 | 512 MiB（原）| 15.3 t/s | 10.1 t/s | 18.5G | 基准 |
 | **3072 MiB** | **25.4 t/s (+66%)** | **20.4 t/s (+102%)** | 21.0G | ✅ **甜点** |
-| 4096 MiB | 加载极慢/卡分配 | — | 21.9G | ❌ 过犹不及 |
+| 4096 MiB | 在观察窗口内未完成加载 | — | 21.9G | ⚠️ 尚不能判定永久失败 |
 
 **结论：**
 - 显存余量（当时 3.7G）白白闲置，加大 pool 白捡速度
@@ -75,28 +75,31 @@
 
 ### 1. 原生 sliding window（SWA）
 
-- **Qwen3.8（qwen35）不是原生 SWA 模型**：`src-b10816/src/models/qwen35.cpp` 没有 SWA/sliding-window 配置；模型本身按 full attention 设计。
-- `--swa-full` 只控制模型已经声明的 SWA 层，对 Qwen3.8 不会凭空增加滑动窗口。
-- 运行时强行把 full attention 改成 sliding window 会丢失中间历史，可能影响跨文件依赖、早期约束、长文档检索；不能把它当作无副作用优化。
+- **Qwen3.8（qwen35）不是原生 SWA 模型**：`src-b10816/src/models/qwen35.cpp` 没有 SWA/sliding-window 配置；`--swa-full` 不会凭空增加滑动窗口。
+- 但 Qwen3.8 也**不是纯 full-attention 模型**：GGUF 元数据声明 `qwen35.full_attention_interval = 4`。源码将模型组织为混合架构：大多数层是 gated delta-net/linear-attention（recurrent），每第 4 个 block 是 dense full-attention；只有 dense attention 层需要这套 KV cache streaming。这个事实本身就是显存和长上下文成本较低的重要原因。
+- 运行时强行把 dense full-attention 改成 sliding window 会丢失中间历史，可能影响跨文件依赖、早期约束、长文档检索；不能把它当作无副作用优化。
 
 ### 2. attention sink（StreamingLLM 思路）
 
-- 需要改 attention 图，让每层只看“最近窗口 + 少量锚点”；这不是普通启动参数。
+- 需要改 attention 图，让 dense attention 层只看“最近窗口 + 少量锚点”；这不是普通启动参数。
 - 对 Qwen3.8 的长期代码任务，锚点不能保证保留所有早期接口、约束和调用关系；可能出现短期回复速度更快、但远距离引用/一致性下降。
+- 由于 Qwen3.8 已经有 recurrent layers 负责部分历史状态，强行对剩余 dense layers 做截断的效果更不能从普通 Transformer 的经验直接推断，必须做真实代码 agent 评测。
 - 应该只有在有专门长程质量评测（跨文件符号、早期约束、NIAH、多轮工具状态）的情况下隔离实现；不应直接用于生产。
 
-### 3. 原生 context-shift 与 KV streaming 的实测结论
+### 3. context-shift 的源码与实测结论
 
 用 b10878、UD-IQ4_XS、q5_1 KV、262K、MTP、视觉做了 ON/OFF 隔离启动：
 
-- ON 组传入 `--context-shift` 后，启动日志明确显示：`KV cache shifting is not supported for this context, disabling KV cache shifting`。
-- OFF 组正常启动；两组都能通过 health check。
-- 因此当前 hybrid + adaptive KV streaming 上，`--context-shift` 会被自动关闭，不能当作“无限续写”方案。
-- 这只是当前实现的兼容性结论，不代表经过专门设计后永远无法支持；若要实现，需要为分块 KV 的位置重映射、GPU staging 和 host backing store 设计一致的 shift/淘汰协议。
+- 实验组传入 `--context-shift` 后，服务端日志明确显示它被禁用；两组都能通过 health check。
+- **首要原因是 multimodal server policy**：`tools/server/server-context.cpp` 在 mmproj 成功加载后直接将 `ctx_shift` 设为 false，并说明 multimodal 不支持 context shift。图片 token 不是普通单 token 文本，不能安全地按普通文本上下文滚动。
+- **还有一个模型级限制**：Qwen3.8 的 `llama_model_rope_type()` 返回 `LLAMA_ROPE_TYPE_IMROPE`，而 `llama_hparams::n_pos_per_embd()` 对 MROPE/IMROPE 返回 4；`llama_kv_cache::get_can_shift()` 对多位置维度返回 false。也就是说，即使不加载 mmproj，当前模型的位置编码也不能直接使用普通 K-shift。
+- 因此当前 `Qwen3.8 + 视觉 + adaptive KV streaming` 上，`--context-shift` 会被自动关闭，不能当作“无限续写”方案。之前把禁用主要归因于“KV streaming hybrid 后端物理上不能 shift”是不准确的，已以源码证据更正。
+- 这不等于永远无法实现滚动上下文；需要专门处理 IMROPE 的多维位置、视觉 token 组、recurrent state 和分块 KV 的一致性，属于独立功能开发而不是无风险开关。
 
 ### 4. 不应过度解读的地方
 
-- KV streaming **不是**把“旧历史完全不参加 attention”；Qwen3.8 仍是 full attention，生成一个 token 原则上仍要处理全历史。准确说法是：streaming 把 KV backing store 与 GPU resident/staging pool 分开，减少峰值显存；缺页/分块搬运仍可能成为长上下文 decode 的主要代价。
+- KV streaming **不是**把“旧历史完全不参加 attention”；dense attention 层仍原则上处理其可见历史。准确说法是：streaming 把 KV backing store 与 GPU resident/staging pool 分开，减少峰值显存；缺页/分块搬运仍可能成为长上下文 decode 的主要代价。
+- 该实现已经包含 CUDA copy stream、CUDA event、transfer ring、跨层 prefetch、连续 page copy、dirty-row 更新，以及根据 deadline miss/copy-engine busy ratio 自适应调整 resident/ring 分区。异步预取不是尚未实现的空白，后续应先观测再改。
 - 之前“历史很旧所以通常不主动读取”“20K prefill 搬运开销可忽略”等表述没有经过逐层传输计数或完整对照，**不作为已证实结论**。
 
 ---
@@ -148,16 +151,46 @@ min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0
 
 ## 七、进一步研究方向（按收益/风险排序）
 
-1. **先做传输可观测性**：记录每次 decode 的 active tokens、stream span 数、host↔device bytes、stage 命中率和 PCIe 吞吐；没有这些计数，任何“加速了搬运”的说法都只是猜测。
-2. **做 stage 的系统扫描**：q5_1 下比较 512/1024/1536/2048/2560/3072，分别测 20K、50K、100K、200K 输入；目标是找到“速度—余显存—加载时间”的 Pareto 点，而不是盲目吃满 97%。
-3. **研究异步预取/双缓冲**：在 attention 计算当前 chunk 时，异步预取下一个 KV chunk；需要保证 stream、event、生命周期和 pinned host buffer 正确，属于最有价值的代码优化方向。
-4. **研究 chunk 布局与访问顺序**：减少碎片、让 host backing store 连续、按 attention 扫描顺序预取，可能比单纯扩大 stage 更有效。
+1. **先做传输可观测性**：当前代码已经有 resident/streamed/transfer 计数和 trace hook，但最终日志没有稳定汇总出一次完整请求的累计值；应补齐请求级汇总或用 profiler 校准 host↔device bytes、copy waits、stage 命中率和 PCIe 吞吐。
+2. **做 stage 的系统扫描**：q5_1 下比较 512/1024/1536/2048/2560/3072，分别测 20K、50K、100K、140K+ 输入；目标是找到“速度—余显存—加载时间”的 Pareto 点，而不是盲目吃满 97%。
+3. **调现有预取管线**：不是重新添加双缓冲，而是根据 trace 调整已有 transfer ring 的 slot 数、lookahead、page 合并和 decode span；每次改变都要配合正确性测试。
+4. **研究异步 copy 与 compute 的重叠质量**：如果 copy engine 未饱和但 deadline miss 高，重点查事件依赖/预取时机；如果 copy engine 饱和，PCIe 和 pinned host memory 可能是硬上限。
 5. **最后才做 attention sink**：先建立真实代码 agent 质量集；若短窗口丢失早期约束，就应放弃，而不是为了 t/s 强行上线。
 
+### 150K 及以上 trace 复核（2026-09-06）
+
+之前名义上的 150K 请求实际只有 114,094 tokens，仍没有越过 resident 边界。随后用相同的 trace 配置做了真正越界的约 140K 请求：
+
+| 指标 | 结果 |
+|---|---:|
+| 实际 prompt | 135,087 tokens |
+| prefill | 226.42 tok/s |
+| decode | 9.64 tok/s |
+| 检索结果 | ✅ `TRACE140-SIGMA` |
+| 显存 | 21,027 / 22,528 MiB |
+| trace resident pages | 511 -> 510 |
+| trace ring slots | 16 -> 32 |
+
+这证明 adaptive controller 检测到 active pages 超过 resident partition，并将一页/layer 转为更多 ring slots；请求仍然正确完成。135K 的 decode 已降到约 9.6 t/s，说明越过 resident 边界后确实出现了明显代价。
+
+但是本次 trace 的 `samples=0, misses=0, copy busy=0.0%`，不是“没有发生搬运”的证明：本版本的 timing feedback 在该长 prefill/请求边界没有形成有效 completed evaluation sample。当前日志没有直接导出本次请求的累计 streamed bytes 和有效 copy-engine utilization，因此不能据此声称 PCIe 利用率或 deadline miss 为零。后续优化必须先补齐可观测性，或用 profiler/专门测试接口取得这些计数。
+
+### 源码复核后的优化判断（2026-09-06）
+
+- 已有 copy stream、event、transfer ring、跨层 prefetch 和自适应 resident/ring 分区；重复添加一个普通“双缓冲”不是明确收益点。
+- q5_1 在本构建支持 direct quantized attention，且 `GGML_CUDA_FA_ALL_QUANTS=ON`；保留 q5_1 是合理的质量/传输折中。
+- 当前最有希望的低风险工作是：补齐 streamed-page/byte、copy wait、deadline 和 end-to-end trace，并扫描 stage/ring 的 Pareto 点。
+- 若确认 copy engine 饱和，才针对 page 合并、预取距离、ring slots 和 pinned host allocation 调参；若 copy 不饱和而 GPU attention 饱和，则扩大 pool 也不会继续解决 decode。
+- attention sink / 非原生 sliding window 仍不进入生产：Qwen3.8 的 dense layers 与 recurrent state 共同承担上下文语义，截断历史必须用真实代码 agent 质量集验证。
+
 ---
 
-## 八、遗留 / 待办
+## 九、当前状态
 
----
+- 生产脚本推荐 `q5_1/q5_1 + stage 3072 + MTP + 视觉`。
+- 约 140K prompt 已越过 resident 边界并正确检索；decode 约 9.64 t/s。
+- 这次 trace 暴露了“日志有内部计数、但请求级汇总不完整”的可观测性缺口。
+- 没有新的代码优化直接进入生产；所有 attention 截断实验仍隔离。
 
-*报告日期：2026-09-05/06 · RTX 2080 Ti 22G · UD-IQ4_XS*
+*报告日期：2026-09-06 · RTX 2080 Ti 22G · UD-IQ4_XS*
+
