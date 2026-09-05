@@ -14,7 +14,7 @@ if not exist "%SOURCE%\llama-server.exe" (
 
 if not exist "%DEST%" mkdir "%DEST%"
 copy /Y "%SOURCE%\*.dll" "%DEST%\" >nul
-copy /Y "%SOURCE%\llama-server.exe" "%DEST%\llama-server-kv.exe" >nul
+copy /Y "%SOURCE%\llama-server.exe" "%DEST%\" >nul
 if exist "%SOURCE%\llama-perplexity.exe" copy /Y "%SOURCE%\llama-perplexity.exe" "%DEST%\" >nul
 if exist "%SOURCE%\llama-perplexity-impl.dll" copy /Y "%SOURCE%\llama-perplexity-impl.dll" "%DEST%\" >nul
 copy /Y "%CUDA_BIN%\cudart64_12.dll" "%DEST%\" >nul

@@ -14,7 +14,7 @@ set "MODEL=%~f1"
 set "MMPROJ=%~f2"
 set "PORT=%~3"
 if not defined PORT set "PORT=18080"
-set "SERVER=%~dp0..\bin\llama-server-kv.exe"
+set "SERVER=%~dp0..\bin\llama-server.exe"
 
 "%SERVER%" ^
     -m "%MODEL%" ^

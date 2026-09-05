@@ -110,7 +110,7 @@ The test controller refuses to run while another `llama-server` or watchdog is a
 
 ```bat
 python tools\run_case.py ^
-  --server bin\llama-server-kv.exe ^
+  --server bin\llama-server.exe ^
   --model D:\models\Qwen3.8-27B.gguf ^
   --mmproj D:\models\mmproj.gguf ^
   --ctx 262144 ^
