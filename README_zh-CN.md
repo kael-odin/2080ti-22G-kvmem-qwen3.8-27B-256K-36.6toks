@@ -2,7 +2,7 @@
 
 **跑超大上下文，不需要超大显存。** 本仓库让 [adaptive KV streaming](https://github.com/RaymondHuang210129/llama.cpp-adaptive-kv-streaming) 在 **RTX 2080 Ti（Turing / sm_75，2018 年的老卡，22G 显存）** 上真正可用——用 27B 模型跑到 **26 万 token 上下文**，而这原本需要 40G 以上显存。
 
-> **一句话原理：** 推理时显存不够装 KV 缓存，上下文就断了。KV 流式把"记忆(KV 缓存)"**按需搬到系统内存(RAM)**，显存只留当前窗口。就这一个小改动，上下文上限从 ~5 万拉到 26 万。
+> **一句话原理：** 推理时显存不够装 KV 缓存，上下文就断了。KV 流式把"记忆(KV 缓存)"**按需搬到系统内存(RAM)**，显存保留一块常驻池、其余分页从 RAM 流式拉取。上下文上限从 ~5 万拉到 26 万。
 
 ---
 
@@ -15,7 +15,7 @@
 | | 固定 KV（旧办法） | **本仓库：KV 流式** |
 |---|---|---|
 | 22G 卡最大上下文 | ~5.3 万 token ❌ | **~26.2 万 token ✅** |
-| 生成速度 | 快 | **~30–42 tok/s（基本持平）** |
+| 生成速度 | 快 | **常驻区内 30–42 tok/s；越过 135K 常驻边界后约 9.6 tok/s** |
 | KV 占显存 | 全部 | 只占当前窗口 |
 | 代价 | — | 改用系统内存 |
 
@@ -88,6 +88,8 @@ python tools\run_case.py ^
 | 262K | 流式(1,024 MiB池) | 205.76 | **3.08** | 2.30 GiB |
 
 **一句话：** 固定 KV 装得下时，解码更快；**装不下时才用流式**——而要在 22G 卡上跑到 262K，**流式是唯一办法**。
+
+**常驻边界实测（UD-IQ4_XS，q5_1 KV，3,072 MiB 池，2026-09-06）：** 一个 135,087-token 的请求跨过常驻分区（trace：resident pages 511→510，ring slots 16→32），标记精确找回，decode 9.64 t/s（prefill 226.4 t/s）。在常驻池内（≤ ~13 万 token）decode 保持 30–42 t/s。细节与限制见[运维报告](docs/ops-stability-optimization-report.md)。
 
 *(其他配置（含 GSQ-RCO、Q8_0/Q8_0 对照）见 [`results/benchmark-summary.csv`](results/benchmark-summary.csv) 和 [`docs/report-zh.md`](docs/report-zh.md)。)*
 

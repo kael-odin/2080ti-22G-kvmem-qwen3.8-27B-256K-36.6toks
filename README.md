@@ -15,8 +15,8 @@
 | | Fixed KV (the old way) | **This repo: KV streamed** |
 |---|---|---|
 | Max context on 22 GB | ~53K tokens ❌ | **~262K tokens ✅** |
-| Decode speed | fast | **~30–42 tg/s (≈ same)** |
-| VRAM used for KV | all of it | only the current window |
+| Decode speed | fast | **30–42 tg/s when resident; ~9.6 tg/s after the 135K resident boundary** |
+| VRAM used for KV | all of it | resident pool plus streamed host-backed pages |
 | Docs of LL seats (RAM) | — | uses system RAM instead |
 
 **80C video card → 260K context, in practice, with correct answers.** Verified on a real needle-in-a-haystack at **260,096 tokens**, exact answer recovered.
@@ -87,6 +87,8 @@ python tools\run_case.py ^
 | 128K | fixed | 308.64 | 25.99 | 1.11 GiB |
 | 170K | fixed | 377.65 | 25.50 | **69 MiB — unsafe** |
 | 262K | adaptive 1,024 MiB | 205.76 | **3.08** | 2.30 GiB |
+
+**Resident-boundary check (UD-IQ4_XS, q5_1 KV, 3,072 MiB pool, 2026-09-06):** a 135,087-token prompt crossed the resident partition (trace: resident pages 511→510, ring slots 16→32), recovered the marker exactly, and decoded at 9.64 t/s (prefill 226.4 t/s). Inside the resident pool (≤ ~130K tokens) decode stays at 30–42 t/s. Details and caveats in the [ops report](docs/ops-stability-optimization-report.md).
 
 **The takeaway:** when fixed KV fits, it's faster for decode. KV streaming is for when it doesn't — and it's the *only* way to hit 262K on 22 GB.
 
