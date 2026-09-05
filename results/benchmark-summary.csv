@@ -23,3 +23,4 @@ gsq-262k-k8v8-adaptive,gsq-rco-iq3-s,262144,k8v8,adaptive,1024,512,128,true,true
 gsq-262k-k8v4-adaptive-load,gsq-rco-iq3-s,262144,k8v4,adaptive,1024,512,128,true,true,,,,,,true,16914,5317,,load-only; long request pending
 prod-b10816-20k-k4v4,prod-b10816-llama-cpp,32768,k4v4,fixed,0,512,512,true,false,22930,383.44,1.50,12,12,true,17012,5219,12440,official b10816 20K prefix baseline
 b10816-smoke-8k,b10816-kvstream-sm75,8192,k4v4,fixed,0,512,512,true,false,28,55.77,24.48,2,2,true,16207,6024,12636,merged b10816+adaptiveKV+sm75 binary smoke
+ud-iq4xs-262k-q8v8-smoke,ud-iq4xs,262144,q8v8,adaptive,1024,512,128,true,true,64,79.65,33.70,12,13,false,18493,4035,,2026-09-05 verified: UD-IQ4_XS + q8_0 KV + MTP draft + vision, smoke inference 30-42 tg/s
