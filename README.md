@@ -59,6 +59,31 @@ At 64K on the GSQ model, fixed Q8_0/Q8_0 was the best tested quality/speed point
 
 Q8_0/Q4_0 did not reproduce the severe prefill slowdown seen in another model/build, but it had no speed advantage over Q8_0/Q8_0 here. Use Q8_0/Q8_0 while it fits, Q4_0/Q4_0 for 262K fixed KV, and adaptive streaming only when model identity or capacity requires it.
 
+### Turbo IQ4_XS K8V4 results
+
+The K8V4 mixed KV type was retested on the patched fork with real 130K/260K-token requests:
+
+| Context | Mode | Prefill t/s | Decode t/s | Exact NIAH | Min free VRAM |
+|---:|---|---:|---:|---|---:|
+| 64K | fixed | 516.64 | 33.35 | yes | 3.54 GiB |
+| 128K | fixed | 308.64 | 25.99 | yes | 1.11 GiB |
+| 170K | fixed | 377.65 | 25.50 | yes | **69 MiB — do not use** |
+| 262K | adaptive 1,024 MiB | 205.76 | 3.08 | yes | 2.30 GiB |
+
+The historical "K8V4 20x prefill slowdown" did not reproduce on this build: 64K prefill reached 516 t/s. Fixed K8V4 at 170K loads but leaves only 69 MiB free, so the practical K8V4 long-context form is adaptive streaming at 262K.
+
+## b10816 Integration (2026-09-05)
+
+The adaptive-KV implementation and the sm_75 fix were merged onto upstream llama.cpp **b10816** (commit `427291b5b`). Upstream had evolved 366 commits past the fork's b10450 base and added a new sparse-attention path inside the same Flash Attention MMA kernels, so the merge was a true three-way integration, not a cherry-pick:
+
+- `launch_fattn` gained both the upstream `use_sparse` parameter and the fork's `partial_dst`/`partial_meta` outputs.
+- The MMA kernel template now carries `use_sparse` and `output_partial` as orthogonal flags; the sparse dispatch from b10816 is preserved and Qwen3.8 (DKQ=256) never selects it.
+- Two upstream inconsistencies were fixed during the merge: a leftover `name_tag` reference in `llama-kv-cache.cpp` and a string-literal call in `llama-memory-hybrid-idx.cpp` (indexer KV cache now passes stage size 0 and stays fully on GPU).
+
+The merged tree lives on branch `b10816-kvstream` (commits `b38934d8b` + `3373a00fa`). See `patches/0002-merge-adaptive-kv-into-b10816-sm75.patch` and `docs/b10816-merge-notes-zh.md`. Build it with `scripts\prepare-source-b10816.bat` + `scripts\build-b10816-sm75.bat`.
+
+Smoke status: the merged binary (build 10878) starts, serves an 8K request with MTP draft-2 (2/2 accepted), and exposes `--kv-stream-stage-mib`. Long-context revalidation on this base is still pending; the numbers in this README come from the d873e5d-based build.
+
 ## Build
 
 Requirements:

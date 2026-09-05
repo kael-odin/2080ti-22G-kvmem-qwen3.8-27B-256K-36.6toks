@@ -15,3 +15,11 @@ gsq-64k-k8v8-ub128,gsq-rco-iq3-s,65536,k8v8,fixed,0,512,128,true,true,64512,330.
 gsq-170k-k8v8-load,gsq-rco-iq3-s,174080,k8v8,fixed,0,512,128,true,true,,,,,,true,21019,1212,18120,load-only
 gsq-192k-k8v8-load,gsq-rco-iq3-s,196608,k8v8,fixed,0,512,128,true,true,,,,,,false,22035,196,17953,load-only below safety threshold
 gsq-262k-k4v4,gsq-rco-iq3-s,262144,k4v4,fixed,0,512,128,true,true,260096,182.20,16.75,12,12,true,21334,897,14266,mmproj loaded; peak below preferred 1 GiB free
+turbo-64k-k8v4-fixed,turbo-iq4-xs,65536,k8v4,fixed,0,512,512,true,false,64512,516.64,33.35,12,12,true,18611,3620,15925,K8V4 no slow path on patched fork
+turbo-128k-k8v4-fixed,turbo-iq4-xs,131072,k8v4,fixed,0,512,512,true,false,130048,308.64,25.99,12,12,true,21096,1135,14954,
+turbo-170k-k8v4-fixed,turbo-iq4-xs,174080,k8v4,fixed,0,512,512,true,true,130048,377.65,25.50,12,12,true,22162,69,14621,load OK but only 69 MiB free; not for production
+turbo-262k-k8v4-adaptive,turbo-iq4-xs,262144,k8v4,adaptive,1024,512,512,true,true,260096,205.76,3.08,12,12,true,19874,2357,8755,full 260K NIAH exact; mmproj loaded
+gsq-262k-k8v8-adaptive,gsq-rco-iq3-s,262144,k8v8,adaptive,1024,512,128,true,true,260096,132.65,2.53,12,12,true,16771,5460,7732,full 260K NIAH exact; 8K vision+MTP passed
+gsq-262k-k8v4-adaptive-load,gsq-rco-iq3-s,262144,k8v4,adaptive,1024,512,128,true,true,,,,,,true,16914,5317,,load-only; long request pending
+prod-b10816-20k-k4v4,prod-b10816-llama-cpp,32768,k4v4,fixed,0,512,512,true,false,22930,383.44,1.50,12,12,true,17012,5219,12440,official b10816 20K prefix baseline
+b10816-smoke-8k,b10816-kvstream-sm75,8192,k4v4,fixed,0,512,512,true,false,28,55.77,24.48,2,2,true,16207,6024,12636,merged b10816+adaptiveKV+sm75 binary smoke
