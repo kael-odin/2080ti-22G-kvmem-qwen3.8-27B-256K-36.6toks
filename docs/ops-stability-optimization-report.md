@@ -71,41 +71,92 @@
 
 ---
 
-## 四、B 实验可行性评估：sliding window / attention sink
+## 四、B 实验复核：sliding window / attention sink / context-shift
 
-### 结论：对当前模型做不了 sliding window（模型不支持）
+### 1. 原生 sliding window（SWA）
 
-- **Qwen3.8 (qwen35) 是纯 full-attention 模型**：源码 `qwen35.cpp` 无 SWA/sliding 引用（grep=0）
-- SWA 是**训练时按架构内置**的（如 afmoe/cohere2 每 4 层 1 个 SWA 层）；Qwen3.8 没有
-- `--swa-full` 参数只对"原生有 SWA 层的模型"生效，对 qwen35 无效
-- **强行在运行时加 sliding window 会破坏模型原本注意力模式**，直接损失长程质量（高风险低回报）
+- **Qwen3.8（qwen35）不是原生 SWA 模型**：`src-b10816/src/models/qwen35.cpp` 没有 SWA/sliding-window 配置；模型本身按 full attention 设计。
+- `--swa-full` 只控制模型已经声明的 SWA 层，对 Qwen3.8 不会凭空增加滑动窗口。
+- 运行时强行把 full attention 改成 sliding window 会丢失中间历史，可能影响跨文件依赖、早期约束、长文档检索；不能把它当作无副作用优化。
 
-### 可行的替代：attention sink（StreamingLLM 思路）
-- 不需要模型原生支持，运行时强制只 attend 最近窗口 + 少量锚点 token
-- 但同样要改 attention 图，且对长程依赖强的 Qwen3.8 风险不小
-- **建议作为远期实验**，优先做 q5_1 + 3072 pool 的确定收益
+### 2. attention sink（StreamingLLM 思路）
+
+- 需要改 attention 图，让每层只看“最近窗口 + 少量锚点”；这不是普通启动参数。
+- 对 Qwen3.8 的长期代码任务，锚点不能保证保留所有早期接口、约束和调用关系；可能出现短期回复速度更快、但远距离引用/一致性下降。
+- 应该只有在有专门长程质量评测（跨文件符号、早期约束、NIAH、多轮工具状态）的情况下隔离实现；不应直接用于生产。
+
+### 3. 原生 context-shift 与 KV streaming 的实测结论
+
+用 b10878、UD-IQ4_XS、q5_1 KV、262K、MTP、视觉做了 ON/OFF 隔离启动：
+
+- ON 组传入 `--context-shift` 后，启动日志明确显示：`KV cache shifting is not supported for this context, disabling KV cache shifting`。
+- OFF 组正常启动；两组都能通过 health check。
+- 因此当前 hybrid + adaptive KV streaming 上，`--context-shift` 会被自动关闭，不能当作“无限续写”方案。
+- 这只是当前实现的兼容性结论，不代表经过专门设计后永远无法支持；若要实现，需要为分块 KV 的位置重映射、GPU staging 和 host backing store 设计一致的 shift/淘汰协议。
+
+### 4. 不应过度解读的地方
+
+- KV streaming **不是**把“旧历史完全不参加 attention”；Qwen3.8 仍是 full attention，生成一个 token 原则上仍要处理全历史。准确说法是：streaming 把 KV backing store 与 GPU resident/staging pool 分开，减少峰值显存；缺页/分块搬运仍可能成为长上下文 decode 的主要代价。
+- 之前“历史很旧所以通常不主动读取”“20K prefill 搬运开销可忽略”等表述没有经过逐层传输计数或完整对照，**不作为已证实结论**。
 
 ---
 
-## 五、当前最佳生产参数（代码 agent）
+## 五、重新复核后的优化优先级
 
-```
---kv-stream-stage-mib 3072    # 实测甜点
--ctk q5_1 -ctv q5_1           # KV 量化平衡点（实测质量不损）
--c 131072                     # 代码 agent 128K 够用，KV 总量降 decode 快
---spec-draft-n-max 3          # 代码生成规律强，draft 3 收益更大
-max_tokens ≥ 500              # 避免 reasoning 吞输出
-温度 0.1-0.3                  # 代码确定性
-```
+### 已证实、低风险
+
+1. **使用 q5_1 KV，而不是 q4**：符合本机对长上下文质量的要求；本次 50K 远距离检索命中 `UNICORN-7788`。这不是完整质量基准，正式质量结论仍应使用多任务评测。
+2. **合理增大 staging pool**：512→3072 MiB 的同类测试中，33K decode 从 15.3 提升到 25.4 t/s，47–52K 从 10.1 提升到 20.4 t/s；3072 是目前已完成且可工作的甜点。
+3. **保留 prompt cache 的稳定前缀**：agent 断线后若重新发送完全相同的前缀，有机会复用缓存；请求顺序、工具列表、系统提示和历史必须保持一致。
+4. **单槽运行**：`-np 1`，因为多槽会把 KV 和 staging 竞争放大；并发需求应先做容量/速度测试，不应直接开多槽。
+
+### 尚未证实、需要隔离测量
+
+- `stage=3072` 是否是 q5_1 下的真正最优点；4096 的第一次启动未完成，不能把它写成永久失败。
+- q5_1 与 q8_0 的长程代码质量差异；一次合成 secret 检索不能代表真实代码 agent 质量。
+- attention sink、运行时滑动窗口、KV 预取/异步 DMA、PCIe pinned-memory 调优。
+- 262K 真正满上下文下的 q5_1 decode 曲线；之前的 33–52K 是性能样本，不等于 260K 性能。
 
 ---
 
-## 六、遗留 / 待办
+## 六、代码 Agent 推荐配置（重新复核版）
 
-- [x] 实测 `q5_1 KV + stage 3072` 组合（2026-09-06：decode 23.6 t/s，长文检索命中，质量不损）
-- [ ] 评估 attention sink 的可行性与风险（远期，Qwen3.8 无原生 SWA 层，改运行时 attention 风险高）
-- [ ] 用 97% 显存利用率的边界验证（pool 3072 是已验证上限）
-- [ ] prompt cache 场景专项测试（agent 重复提交代码库时的加速比）
+**默认优先正确性和可恢复性：**
+
+```
+-c 262144                     # Qwen3.8 原生上限；不要把 512K 当作已生效
+-ctk q5_1 -ctv q5_1           # 长上下文质量优先
+--kv-stream-stage-mib 3072   # 当前已验证可工作的速度/显存平衡
+-np 1                         # 单槽，避免 KV 竞争
+-b 512 -ub 128                # 当前已验证组合
+--spec-type draft-mtp --spec-draft-n-max 2
+--image-min-tokens 1024       # 需要视觉时
+```
+
+官方 Qwen3.8 thinking-mode 请求参数应由客户端传入（不要只依赖服务端默认值）：
+
+```
+temperature=1.0, top_p=0.95, top_k=20,
+min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0
+```
+
+- `max_tokens` 是整次响应上限，不是“最终回答上限”；thinking agent 应留足预算。官方给出的 262,144 reasoning / 131,072 final 是 1M 框架语境下的上限建议，不能原样理解为 262K 本地上下文还能额外容纳这么多输出。
+- 对本地 262,144 总上下文，必须把输入、reasoning、工具结果和最终输出一起预算；实际代码 agent 应留出明确输出余量，不能把输入填到 262K 后再期待长回答。
+- `--context-shift` 当前会被 KV streaming 禁用；不要把它写进生产脚本并误以为启用了无限上下文。
+
+---
+
+## 七、进一步研究方向（按收益/风险排序）
+
+1. **先做传输可观测性**：记录每次 decode 的 active tokens、stream span 数、host↔device bytes、stage 命中率和 PCIe 吞吐；没有这些计数，任何“加速了搬运”的说法都只是猜测。
+2. **做 stage 的系统扫描**：q5_1 下比较 512/1024/1536/2048/2560/3072，分别测 20K、50K、100K、200K 输入；目标是找到“速度—余显存—加载时间”的 Pareto 点，而不是盲目吃满 97%。
+3. **研究异步预取/双缓冲**：在 attention 计算当前 chunk 时，异步预取下一个 KV chunk；需要保证 stream、event、生命周期和 pinned host buffer 正确，属于最有价值的代码优化方向。
+4. **研究 chunk 布局与访问顺序**：减少碎片、让 host backing store 连续、按 attention 扫描顺序预取，可能比单纯扩大 stage 更有效。
+5. **最后才做 attention sink**：先建立真实代码 agent 质量集；若短窗口丢失早期约束，就应放弃，而不是为了 t/s 强行上线。
+
+---
+
+## 八、遗留 / 待办
 
 ---
 
