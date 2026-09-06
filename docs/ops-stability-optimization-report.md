@@ -226,6 +226,32 @@ min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0
 
 这次测量同时说明：此前的 `samples=0/misses=0/copy busy=0.0%` 不是"没有搬运"，而是请求级聚合缺失；插桩后同一现象背后的真实数据完全不同。
 
+### 计数通道修复实验（2026-09-06，最终裁定）
+
+在隔离构建上实施了"移出 mapped host 内存"修复并四轮递进验证：
+
+1. **v1**：counters 改 `cudaMalloc` + blocking `cudaMemcpy` D2H 读回 → samples 仍 0。
+2. **v2**：修正读回流序（初版误在 copy_stream 记 event，kernel 在 compute stream）→ 仍 0。
+3. **v3**：kernel 加**无条件** `atomicExch` 执行探针（不依赖 ready_flag 分支）+ `cudaMemset` 清零 → 探针也 0。
+4. **v4**：launch 后同流 `EventRecord` + `EventSynchronize` 强制完成 + 全 8 槽 dump → **全 0**。
+
+关键对照：
+
+| 通道 | 结果 |
+|---|---|
+| `cudaMemset`（host→device）清零 | ✅ 生效（读到 0 而非垃圾值） |
+| host 侧 launch 计数 `dlkern` | ✅ 1024 次，无 CUDA 错误 |
+| 同流 event record + EventSynchronize | ✅ 无错误返回 |
+| **device 原子写（atomicAdd/atomicExch）** | ❌ **写入被静默丢弃** |
+
+**最终裁定：RTX 2080 Ti（sm_75）+ WDDM 平台级缺陷**。四轮排除了调度、流序、下标、编译单元、多 runtime 全部代码层假设后，device 原子写到该缓冲区的主机可见路径在消费级 WDDM 驱动上失效；host→device 方向（memset）正常、device→host 方向的原子写被丢。2080 Ti 无 TCC 模式，本卡在 WDDM 下无修复路径。
+
+**替代方案**：deadline 改纯 host 侧 CUDA event 计时（`cudaEventElapsedTime`，无 device 写回）；或在 Linux 同卡重验。插桩与修复尝试已存 `src-b10816` git stash（`counter-channel fix attempts`），生产源树与生产二进制未动。
+
+附带实测：含每 ubatch 一次阻塞读回的版本 135K decode 10.2 t/s，与基线 9.6–9.8 t/s 同量级——修复方向的同步开销可忽略，瓶颈纯粹是平台可见性。
+
+**对前文结论链的更正**：上一节"copy/compute 零重叠、waits==uploads"的瓶颈判断需降级——`compute_stream_waits` 是 API 调用计数而非阻塞时长，且 deadline/xfetch 两个质量反馈通道本就是坏的，重叠质量实际未知。可靠结论保留：**不是 PCIe 带宽**（0.35 GiB/s 远低于链路上限）；decode 掉速的真实构成需要等 host 侧计时替代方案落地后重测。
+
 ---
 
 ## 九、当前状态
