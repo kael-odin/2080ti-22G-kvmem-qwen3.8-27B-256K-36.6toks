@@ -280,6 +280,38 @@ hosttime 版（纯 host 侧 event 计时）编译完成后，用三个新探针�
 
 ---
 
+## 十、decode 优化落地：q5_1 KV 直上 GPU（2026-09-07）
+
+用户目标"生产日常也用 q5_1 KV + 优化 decode"由一条编译开关路线达成，无需动任何源码。
+
+### 归因实验（A/B 对照，同模型同参仅差 KV 类型/构建）
+
+| 配置（135K，UD-IQ4_XS） | 构建 | prefill | decode | marker |
+|---|---|---:|---:|---|
+| hybrid q5_1 + stage 3072（kv-stream fork） | fork trace | 216-217 | 9.2-10.2 | ✅ |
+| fixed q5_1（标准构建） | b10816 官方 Clang | **12（CPU 回退）** | — | — |
+| fixed q4_0（标准构建） | b10816 官方 Clang | 221.5 | 18.6 | ✅ |
+| fixed q5_1（FA_ALL_QUANTS 重建） | b10816 faq5 | 339.8（峰值 412） | 23.8 | ✅ |
+
+两个结论：① **标准构建遇到 q5_1/q5_1 KV 会触发注意力算子 CPU 回退**（prefill 12 t/s、CPU 时间 ≈9.4 核持续打满）——标准 CMake 默认不编译 q5_1 组合的 FA 内核；② 补上 `GGML_CUDA_FA_ALL_QUANTS=ON` 后，q5_1 fixed 不仅可用，还是**全部配置里最快的**：decode 23.8 t/s，比 kv-stream hybrid 快 2.5 倍、比 q4_0 fixed 快 28%；prefill 340-412 t/s。
+
+kv-stream hybrid 的 9.5 t/s 由此定性：那是其 per-layer 部分归并/尾页机制的成本，不是 135K 注意力的固有成本。**≤170K 的日常上下文，fixed q5_1 全面胜出；hybrid 只在 fixed 装不下的超长上下文（>200K）才有价值。**
+
+### 生产落地（可回滚）
+
+- 新引擎目录 `F:\AI-Models\llama.cpp-faq5\`（自包含 exe+DLL，源码树 `llama.cpp-src` 未改一行，仅 CMake 开关；重建脚本 `build-b10816-faq5.bat`；README 记录来源/回滚/混用 DLL 的坑）。
+- `scripts\start\start-qwen38-27B.bat` 与 `start-agent.bat`：引擎指向 faq5，`--cache-type-k/v q5_1`，`-ub 512→256`（显存余量 462→660 MiB）。
+- 日常配置最终验收（TURBO-Fable + q5_1 + 174080 ctx + ub256）：30K prefill 529 / decode 26.2；135K prefill 371.8 / decode 24.8，marker 精确；512px 视觉答对、1024px 视觉峰值显存 22.13G（ub512 下实测）无 OOM。
+- 回滚方式：脚本路径改回 `llama.cpp\` + cache-type 改回 q4_0（旧二进制原样保留）。
+- 坑（记录）：q5_1 慢不是模型或卡的问题，是内核缺失的 CPU 回退；症状是 CPU 打满 + prefill 一个数量级掉速。官方 DLL 与 faq5 DLL 不可混目录，否则静默加载旧 ggml-cuda.dll 复现回退。
+
+### 对优化路线的更新
+
+- "把 host 侧 event 计时装到尾页路径"仍然成立，但优先级下降：hybrid 已退出日常配置，仅服务于 >200K 长上下文场景（fixed q5_1 在 262K 装不下：KV 7.5G + 模型 14.6G > 22.5G）。
+- 稳定性验收（agent 断网重载、20K 前缀命中等）此前已在 K4V4 上通过，q5_1 路径数学与 q4_0 完全同构（仅量化格数不同），预期同稳；如需可复跑第八节验收。
+
+---
+
 ## 九、当前状态
 
 - 生产脚本推荐 `q5_1/q5_1 + stage 3072 + MTP + 视觉`。
@@ -287,6 +319,7 @@ hosttime 版（纯 host 侧 event 计时）编译完成后，用三个新探针�
 - 这次 trace 暴露了“日志有内部计数、但请求级汇总不完整”的可观测性缺口。
 - 没有新的代码优化直接进入生产；所有 attention 截断实验仍隔离。
 - 2026-09-06 补：135K 用例三次重跑全通过（q5_1 + MTP + 视觉，prefill 216-217 t/s / decode 9.2-10.2 t/s）；`streamed=0`/hosttime 全零已定案为"多波次预取队列无活动的真零"，尾页流式经 dlkern=1024（16 层 × 64 evals）证实在真实发生；WDDM 计数通道裁定维持。下一个实验：把 host 侧 event 计时装到尾页路径。
+- 2026-09-07 补：decode 优化落地——标准构建 q5_1 KV 会 CPU 回退（内核缺失），加 `GGML_CUDA_FA_ALL_QUANTS=ON` 重建后 q5_1 fixed 全面胜出（135K decode 23.8 vs hybrid 9.5 vs q4_0 18.6），已上生产（`llama.cpp-faq5\` 独立引擎 + 两个启动脚本改 q5_1），详见第十节。hybrid 退出日常配置，仅服务 >200K 场景。
 
-*报告日期：2026-09-06 · RTX 2080 Ti 22G · UD-IQ4_XS*
+*报告日期：2026-09-06（09-07 增补）· RTX 2080 Ti 22G · UD-IQ4_XS / TURBO-Fable*
 
