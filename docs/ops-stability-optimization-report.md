@@ -175,8 +175,27 @@ min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0
 
 但是本次 trace 的 `samples=0, misses=0, copy busy=0.0%`，不是“没有发生搬运”的证明：本版本的 timing feedback 在该长 prefill/请求边界没有形成有效 completed evaluation sample。当前日志没有直接导出本次请求的累计 streamed bytes 和有效 copy-engine utilization，因此不能据此声称 PCIe 利用率或 deadline miss 为零。后续优化必须先补齐可观测性，或用 profiler/专门测试接口取得这些计数。
 
-### 源码复核后的优化判断（2026-09-06）
+### 可观测性插桩实验（2026-09-06，隔离构建）
 
+在隔离构建（`bin-b10816-trace`，独立于生产二进制）上给 `record_deadline` kernel 加 host 侧发射计数（`dlkern`），再用同一 135K 用例对照：
+
+| 版本 | dlkern（kernel 发射）| samples（host 读到）| 结论 |
+|---|---:|---:|---|
+| 原逻辑 | — | 0 | 无法定位 |
+| + 发射计数 | 1024 | 0 | kernel 确实发射 |
+| + 每 launch 后强制 `cudaStreamSynchronize` | 736 | 0（1082/1082 行）| kernel 确实执行完毕 |
+
+**根因裁定：** `deadline_samples/deadline_misses` 位于 `cudaHostAllocMapped` zero-copy host 内存，`record_deadline` kernel 的 `atomicAdd` 在本机（RTX 2080 Ti / sm_75 / WDDM）上执行成功但结果对 host 读取**永久不可见**。这不是调度问题（同步后仍为 0），也不是发射问题（dlkern>0），而是 mapped host 内存上 device 原子写的主机可见性缺失。
+
+**连锁影响：** deadline 自适应机制（`kv_stream_adapt` 的 miss ratio、span tuner、分区决策）从上线起就一直"失明"，`samples=0, misses=0, copy busy 0.0%` 不是"没有搬运压力"的证据，而是计数通道断了。前几轮 trace 里这些 0 值一律不能作为性能结论。
+
+**修复方向（未实施）：** 把 counters 移到 `cudaMalloc` 设备内存，feedback 读取时 `cudaMemcpyAsync` D2H + event 同步；或改用 portable mapped 分配并在 host 读取前 `cudaEventSynchronize`。改动很小，但要重编验证。
+
+**实测附带数据（135K，强制同步版 vs 无同步版）：** prefill 214 vs 221 t/s、decode 9.4 vs 9.8 t/s——1-tid record kernel 的同步代价可忽略；跨 resident 边界的 decode 掉速（≈9.5 t/s）与该 kernel 无关。
+
+**实验产物处置：** 插桩改动已存入 `src-b10816` 的 git stash（`instrumented dlkern+sync experiments`），隔离二进制保留在 `bin-b10816-trace`，生产源树与生产二进制未动。
+
+- **修复 deadline 计数通道**（最高优先、改动最小）：samples/misses 的 mapped host atomic 在 sm_75+WDDM 不可见，自适应机制全程失明；改 device 内存 + D2H 读回即可修复。修复后才能谈其它调参。
 - 已有 copy stream、event、transfer ring、跨层 prefetch 和自适应 resident/ring 分区；重复添加一个普通“双缓冲”不是明确收益点。
 - q5_1 在本构建支持 direct quantized attention，且 `GGML_CUDA_FA_ALL_QUANTS=ON`；保留 q5_1 是合理的质量/传输折中。
 - 当前最有希望的低风险工作是：补齐 streamed-page/byte、copy wait、deadline 和 end-to-end trace，并扫描 stage/ring 的 Pareto 点。
