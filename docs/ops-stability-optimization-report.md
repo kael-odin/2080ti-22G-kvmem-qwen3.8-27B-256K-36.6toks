@@ -252,6 +252,32 @@ min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0
 
 **对前文结论链的更正**：上一节"copy/compute 零重叠、waits==uploads"的瓶颈判断需降级——`compute_stream_waits` 是 API 调用计数而非阻塞时长，且 deadline/xfetch 两个质量反馈通道本就是坏的，重叠质量实际未知。可靠结论保留：**不是 PCIe 带宽**（0.35 GiB/s 远低于链路上限）；decode 掉速的真实构成需要等 host 侧计时替代方案落地后重测。
 
+### 全链路闭合验证（2026-09-06，hosttime 验证 + 三探针定案）
+
+hosttime 版（纯 host 侧 event 计时）编译完成后，用三个新探针把此前所有未决问题一次性闭合：① graph 模式门（`ucg=`，打印 `ggml_backend_cuda_graph_compute` 每次调用的 use_cuda_graph/更新标志/节点数）；② 收集统计（`fa=/rt=/fits=`，FA 节点总数 / 命中 kv-stream runtime 数 / 通过 streamed_supported 数）；③ skip 原因分解（add_attention 早退时打印具体失败子句）。135K 用例重跑三次（ht5/ht6/ht7，配置同前：q5_1/q5_1 + stage 3072 + MTP draft-2 + 视觉 + -c 262144）：
+
+| 运行 | 结果 | prefill | decode | marker |
+|---|---|---:|---:|---|
+| ht5 | 旧 dll（无探针，作废重跑） | — | — | — |
+| ht6 | 双探针版 | 217.3 t/s | 10.2 t/s | ✅ 精确 |
+| ht7 | 三探针版 | 216.1 t/s | 9.2 t/s | ✅ 精确 |
+
+显存 21,119 / 22,528 MiB；resident 511→510 页、ring 16→32 槽，与此前 trace 一致。数值定案：
+
+**发现 1 —— 主模型 decode 图每步 `ucg=0`（不走 CUDA graph，直接执行）。** 每步模式固定为 3 个 55 节点小图（MTP 草稿，其一 ucg=1）+ 1 个 4134 节点主图 ucg=0。这动态证实了"decode 阶段 resident 页数不足导致 all_layers_fit 不成立 → graph 关闭"的静态推断，同时**排除"CUDA graph replay 吞掉 host 侧收集/计时逻辑"假设**——host 代码每步都在真实执行。
+
+**发现 2 —— streamed 路径全程激活且无一跳过。** 每次 decode eval 均为 `fa=16 rt=1 fits=16`：16 个注意力层全部命中 kv-stream runtime、全部通过 streamed_supported、全部进入收集逻辑，skip 计数为 0。（`fa=16` 而非 65：qwen35 混合架构，65 层中 16 层为全注意力、其余为线性注意力层，仅前者有 KV 页。）
+
+**发现 3 —— `streamed=0` 的真实语义：多波次预取队列为空，不等于"没有流式"。** 由排除法定位：add_attention 唯一不排队出口是逐层守卫 `nchunks ≤ layer_pages[layer]`，其恒成立意味着 **KV 张量的 token 覆盖范围（ne[1]）恰等于 resident 分区（510 页 × 256 = 130,560 tokens）**——张量本地工作集全部驻留，无需 H2D 预取请求；超出 resident 边界的尾页（135K 时 18 页/层，约 4,608 tokens）不经过该队列，由 `flash_attn_ext_streamed` 内部的尾页路径直接处理。
+
+**发现 4 —— dlkern=1024 的复核解释，尾页流式确认在发生。** 1024 = 16 注意力层 × ~64 decode evals，发射点位于插桩版在**尾页路径**加的 record_deadline 调用（每层每 eval 一次，与 span 合并后每层恰好一个流式 span 一致）。即：跨过 130,560-token resident 边界后，每层每步都在对张量外尾页做 deadline 采样——**流式机制真实在运行**，与 decode 掉速到 ~9.2-10.2 t/s 的边界代价互相印证。此前 trace 中 `h2d 6 MiB`（远小于尾页体积）进一步提示尾页数据走 zero-copy mapped 直读而非显式 memcpy。
+
+**发现 5 —— hosttime 全零的原因定案，方案本身有效但装错了位置。** 计时门（`timing_current`）只在 `graph_requests` 非空时武装（`graph_finalize` 提前返回），而本负载下该队列恒空 → `pending=0 cur=0 win_us 0 copy_us 0 uploads 0` 是该路径**没有活动的真零**，不是测量失败。上一轮"host 侧 event 计时"实验计划的 `attn_win_us/copy_sample_us/busy` 三项在本负载下永远测不到东西。
+
+**计数通道裁定维持不变**：graph 队列路径与尾页路径写同一 mapped-memory 计数器，插桩版在尾页路径发射 1024 次仍读 0，四轮对照（memset 生效 / launch 无错 / 同步无错 / 原子写丢失）不依赖发射位置，**sm_75 + WDDM 平台缺陷结论成立**。需同步更正的是：不能由 `samples=0/misses=0` 反推"流式没有发生"——流式在发生，只是它的计数进不了 host。
+
+**下一步修正**：host 侧 event 计时应安装在**尾页路径**（`flash_attn_ext_streamed` 的尾页处理段前后 `EventRecord` + `cudaEventElapsedTime`）——这是本负载下唯一活跃的流式路径，也是 decode 边界掉速的真实来源。装在 graph_requests 路径的计时在本负载下无信号。三个探针（ucg 门/收集统计/skip 原因）已随实验存入 `src-b10816` git stash（`trace probes: ucg gate + prepare stats + skip reasons`），隔离二进制 `bin-b10816-trace` 保留含探针版本。
+
 ---
 
 ## 九、当前状态
@@ -260,6 +286,7 @@ min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0
 - 约 140K prompt 已越过 resident 边界并正确检索；decode 约 9.64 t/s。
 - 这次 trace 暴露了“日志有内部计数、但请求级汇总不完整”的可观测性缺口。
 - 没有新的代码优化直接进入生产；所有 attention 截断实验仍隔离。
+- 2026-09-06 补：135K 用例三次重跑全通过（q5_1 + MTP + 视觉，prefill 216-217 t/s / decode 9.2-10.2 t/s）；`streamed=0`/hosttime 全零已定案为"多波次预取队列无活动的真零"，尾页流式经 dlkern=1024（16 层 × 64 evals）证实在真实发生；WDDM 计数通道裁定维持。下一个实验：把 host 侧 event 计时装到尾页路径。
 
 *报告日期：2026-09-06 · RTX 2080 Ti 22G · UD-IQ4_XS*
 
