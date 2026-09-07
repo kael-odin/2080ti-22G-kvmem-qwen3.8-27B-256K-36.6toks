@@ -77,10 +77,21 @@ scripts\build-b10816-sm75.bat
 |---|---|
 | 8K 冒烟（MTP draft-2，2/2 接受，`--kv-stream-stage-mib` 可见） | 通过（build 10878） |
 | 官方 b10816 20K 前缀基线（K4V4，`validation-runs-prod`） | 通过，可作对照 |
-| 64K / 128K / 260K 真实 NIAH（新基线） | 未做，这是下一步 |
-| PPL（WikiText-2，96 chunk） | 未做，建议与旧表对照 |
+| 135K 跨常驻边界 marker（MTP，`--fit off`） | 通过（FIN-262 精确，12.4-13.1 t/s） |
+| 260K 级 NIAH + 视觉（MTP，`--fit off`） | 通过（ZEBRA=7734，35.1 t/s，acceptance 0.61） |
+| PPL（WikiText-2，96 chunk） | 未做 |
 
-在长上下文重验完成前，对外只宣称“兼容性冒烟通过”，性能数字仍归属旧基线构建。
+**2026-09-07 重要发现（`--fit` 互斥）**：`--fit` 默认 on，在 262144 + draft-mtp
+组合下显存预算超限（draft f16 KV ≈ 1 GiB），fit 会**静默把早期注意力层降级 CPU**，
+KV 流式随即抛出误导性的 "block KV streaming requires the CUDA backend"。
+新基线并非"没修好"——加 `--fit off` 后 262144 + draft-mtp + q5_1 + 视觉全通过
+（显存 21.8/22.5 GiB，短程 37.5 t/s）。逐层插桩证据与排查手册见
+`docs/troubleshooting-zh.md`；插桩补丁为 `patches/0003`。
+ctx 阈值实测：180224 ✅ / 196608 ❌（q5_1 + draft-mtp + 22G 卡）。
+
+另注：旧基线 `kv-streaming/bin`（build 10511，曾验证 260K+MTP）与 `src`（d873e5d）
+已删除；**patches/ 即完整源码记录**（0002 与合并树逐字节校验一致），
+重建配方见 `patches/README.md`。
 
 ## 文件对照
 
