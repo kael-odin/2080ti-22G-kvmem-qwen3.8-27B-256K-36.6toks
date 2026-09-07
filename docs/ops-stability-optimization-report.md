@@ -280,6 +280,21 @@ hosttime 版（纯 host 侧 event 计时）编译完成后，用三个新探针�
 
 ---
 
+## 十一、262K+MTP 起动失败定案：--fit 静默降层（2026-09-07）
+
+**现象**：262144 + draft-mtp + q5_1 + 视觉启动即报
+"block KV streaming requires the CUDA backend"；ctx ≤ 180224 同参数正常。
+
+**插桩定位**（patches/0003 + LLAMA_KV_STREAM_DBG=1）：失败时第一个注意力层
+`il=3 offload=1 dev=CPU reg=CPU`——`--fit`（默认 on）在显存预算超限时
+（draft f16 KV ≈ 1 GiB 是压垮项）静默把部分层降级 CPU；KV 流式要求全部
+注意力层在同一 CUDA 设备，于是硬失败。与 CUDA 安装、驱动、流式核心代码无关
+（180224 对照组逐层全 CUDA、MTP 正常）。
+
+**修复**：`--fit off`。262K+MTP+q5_1+视觉全通过（21.8/22.5 GiB、
+acceptance 0.61、短程 37.5 t/s、135K 跨边界 12.4-13.1 t/s、260K 级 NIAH 正确）。
+**--fit 静默降层与 kv-stream 的"全 GPU 层"要求互斥——A 档永远 --fit off。**
+
 ## 十、decode 优化落地：q5_1 KV 直上 GPU（2026-09-07）
 
 用户目标"生产日常也用 q5_1 KV + 优化 decode"由一条编译开关路线达成，无需动任何源码。
