@@ -90,6 +90,15 @@ python tools\run_case.py ^
 
 **Resident-boundary check (UD-IQ4_XS, q5_1 KV, 3,072 MiB pool, 2026-09-06):** a 135,087-token prompt crossed the resident partition (trace: resident pages 511→510, ring slots 16→32), recovered the marker exactly, and decoded at 9.64 t/s (prefill 226.4 t/s). Inside the resident pool (≤ ~130K tokens) decode stays at 30–42 t/s. Details and caveats in the [ops report](docs/ops-stability-optimization-report.md).
 
+> **⚠️ HEADLINE PITFALL — `--fit` is ON by default and silently downgrades
+> attention layers to CPU when the VRAM budget is exceeded (262K + draft-MTP
+> qualifies). KV streaming requires every attention layer on one CUDA device,
+> so the launch fails with the misleading
+> `block KV streaming requires the CUDA backend`.
+> **Fix: add `--fit off`** (verified: 262144 + draft-MTP + q5_1 KV + vision on
+> a 2080 Ti 22G — 21.8/22.5 GiB, MTP acceptance 0.61, 37.5 t/s short-context).
+> Full write-up: [docs/troubleshooting-zh.md](docs/troubleshooting-zh.md).
+>
 **The takeaway:** when fixed KV fits, it's faster for decode. KV streaming is for when it doesn't — and it's the *only* way to hit 262K on 22 GB.
 
 **2026-09-07 update — q5_1 KV needs `GGML_CUDA_FA_ALL_QUANTS=ON` (a stock llama.cpp build will fall back to CPU):** rebuilding stock b10816 with this single CMake flag (no source changes) gives fixed q5_1 GPU attention kernels, which **beat everything at 135K**: decode 23.8 t/s vs hybrid streaming 9.2–10.2 and fixed q4_0 18.6; prefill 339.8 (peak 412) vs 216–221. Daily-config validation (TURBO-Fable, -c 174080, q5_1, ub256): decode 24.8–26.2, marker exact, 1024px vision OK, VRAM peak 22.13G no OOM. Conclusion: **fixed q5_1 (with the flag) for ≤ ~180K contexts; hybrid streaming is demoted to the >180K niche (262K)** — its 9.5 t/s decode cost is the per-layer partial-reduction/tail-page mechanism, not attention itself. Details in section 十 of the [ops report](docs/ops-stability-optimization-report.md).

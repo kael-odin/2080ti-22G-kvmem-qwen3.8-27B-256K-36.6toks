@@ -1,0 +1,232 @@
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index fa1dd31ae..dbb291d21 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -97,6 +97,8 @@ struct ggml_cuda_kv_stream_transfer_ring {
+     uint32_t last_ring_peak_occupancy = 0;
+     uint64_t current_epoch_uploads = 0;
+     double last_copy_engine_busy_ratio = 0.0;
++    uint64_t last_attention_window_us = 0;
++    uint64_t last_copy_sample_us = 0;
+     uint32_t copy_sample_uploads = 0;
+     bool timing_pending = false;
+     bool timing_current = false;
+@@ -104,6 +106,7 @@ struct ggml_cuda_kv_stream_transfer_ring {
+     bool last_graph_bounded = false;
+     bool last_graph_streamed = false;
+     bool copy_sample_recorded = false;
++    int trace_skip_count = 0;
+ };
+ 
+ ggml_cuda_kv_stream_transfer_ring * ggml_cuda_kv_stream_transfer_ring_new(
+@@ -284,6 +287,8 @@ ggml_cuda_kv_stream_transfer_stats ggml_cuda_kv_stream_transfer_ring_get_stats(
+         ring->deadline_counters_host[0],
+         ring->deadline_counters_host[1],
+         ring->ring_peak_occupancy,
++        ring->last_attention_window_us,
++        ring->last_copy_sample_us,
+     };
+ }
+ 
+@@ -1152,7 +1157,9 @@ static bool kv_stream_collect_timing(ggml_cuda_kv_stream_transfer_ring * ring) {
+         GGML_ASSERT(ring->copy_sample_uploads > 0);
+         busy_ratio = std::min(1.0, double(copy_ms)*double(ring->current_epoch_uploads)/
+             (double(ring->copy_sample_uploads)*double(eval_ms)));
++        ring->last_copy_sample_us = uint64_t(double(copy_ms)*1000.0);
+     }
++    ring->last_attention_window_us = uint64_t(double(eval_ms)*1000.0);
+     ring->last_copy_engine_busy_ratio = busy_ratio;
+     ring->last_ring_peak_occupancy = ring->current_ring_peak_occupancy;
+     ring->timing_pending = false;
+@@ -1473,6 +1480,41 @@ bool ggml_cuda_kv_stream_graph_add_attention(
+     const ggml_tensor * V = dst == nullptr ? nullptr : dst->src[2];
+     if (resident_cache == nullptr || dst == nullptr ||
+             !ggml_cuda_flash_attn_ext_streamed_supported(dst, ring->page_bytes)) {
++        if (getenv("LLAMA_KV_STREAM_TRACE") && ring->trace_skip_count < 48) {
++            const char * why = "unknown";
++            if (dst == nullptr) {
++                why = "dst_null";
++            } else if (resident_cache == nullptr) {
++                why = "no_resident_cache_buft";
++            } else if (dst->op != GGML_OP_FLASH_ATTN_EXT) {
++                why = "not_fa";
++            } else if (dst->src[0]->type != GGML_TYPE_F32) {
++                why = "q_not_f32";
++            } else if (ggml_backend_cuda_kv_stream_get_attention_mode(K->type, V->type) ==
++                       GGML_BACKEND_CUDA_KV_STREAM_ATTENTION_UNSUPPORTED) {
++                why = "mode_unsupported";
++            } else if (dst->src[0]->ne[0] != KV_STREAM_HEAD_DIM || V->ne[0] != KV_STREAM_HEAD_DIM) {
++                why = "head_dim";
++            } else if (K->ne[1] % FATTN_KQ_STRIDE != 0) {
++                why = "kq_stride";
++            } else if (K->nb[0] != ggml_element_size(K) || V->nb[0] != ggml_element_size(V)) {
++                why = "nb0";
++            } else if (K->nb[1] != ggml_row_size(K->type, K->ne[0])*K->ne[2]) {
++                why = "k_layout_nb1";
++            } else if (V->nb[1] != ggml_row_size(V->type, V->ne[0])*V->ne[2]) {
++                why = "v_layout_nb1";
++            } else if (dst->src[3] != nullptr &&
++                       (dst->src[3]->type != GGML_TYPE_F16 || !ggml_is_contiguous(dst->src[3]))) {
++                why = "mask";
++            } else if (dst->src[4] != nullptr) {
++                why = "sinks";
++            } else {
++                why = "stage_block_tokens";
++            }
++            ++ring->trace_skip_count;
++            GGML_LOG_WARN("%s: skip reason=%s n_kv=%lld K.nb1=%zu V.nb1=%zu\n", __func__, why,
++                    (long long) (K ? K->ne[1] : -1), K ? K->nb[1] : 0, V ? V->nb[1] : 0);
++        }
+         return false;
+     }
+     if (ring->graph_resident_cache != nullptr && ring->graph_resident_cache != resident_cache) {
+@@ -1592,6 +1634,15 @@ double ggml_cuda_kv_stream_copy_engine_busy_ratio(
+         return 0.0;
+     }
+     (void) kv_stream_collect_timing(ring);
++    if (getenv("LLAMA_KV_STREAM_TRACE")) {
++        GGML_LOG_WARN("%s: pending=%d cur=%d streamed=%d win_us %llu copy_us %llu uploads %llu busy %.3f\n",
++            __func__,
++            int(ring->timing_pending), int(ring->timing_current), int(ring->last_graph_streamed),
++            (unsigned long long) ring->last_attention_window_us,
++            (unsigned long long) ring->last_copy_sample_us,
++            (unsigned long long) ring->current_epoch_uploads,
++            ring->last_copy_engine_busy_ratio);
++    }
+     return ring->last_copy_engine_busy_ratio;
+ }
+ 
+diff --git a/ggml/src/ggml-cuda/fattn.cuh b/ggml/src/ggml-cuda/fattn.cuh
+index 815d9635b..2cb81553e 100644
+--- a/ggml/src/ggml-cuda/fattn.cuh
++++ b/ggml/src/ggml-cuda/fattn.cuh
+@@ -30,6 +30,8 @@ struct ggml_cuda_kv_stream_transfer_stats {
+     uint64_t deadline_samples = 0;
+     uint64_t deadline_misses = 0;
+     uint32_t ring_peak_occupancy = 0;
++    uint64_t attention_window_us = 0; // pure host: eval_start->eval_end of last streamed epoch
++    uint64_t copy_sample_us = 0;     // pure host: first upload batch window
+ };
+ 
+ ggml_cuda_kv_stream_resident_cache * ggml_cuda_kv_stream_resident_cache_new(
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 8fa741b69..5623c4250 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -1896,15 +1896,18 @@ static std::vector<ggml_backend_cuda_kv_stream_runtime_t> ggml_cuda_kv_stream_pr
+         const ggml_cgraph * cgraph, cudaStream_t compute_stream) {
+     std::vector<ggml_backend_cuda_kv_stream_runtime_t> runtimes;
+     std::unordered_set<ggml_backend_cuda_kv_stream_runtime_t> seen;
++    int fa_total = 0, fa_runtime = 0, fa_fits = 0;
+ 
+     for (int i = 0; i < cgraph->n_nodes; ++i) {
+         const ggml_tensor * node = cgraph->nodes[i];
+         if (node->op != GGML_OP_FLASH_ATTN_EXT) {
+             continue;
+         }
++        ++fa_total;
+         auto * runtime = ggml_cuda_kv_stream_runtime_from_tensor(node->src[1]);
+         if (runtime != nullptr && runtime == ggml_cuda_kv_stream_runtime_from_tensor(node->src[2]) &&
+                 seen.insert(runtime).second) {
++            ++fa_runtime;
+             ggml_cuda_kv_stream_graph_begin(runtime->transfer_ring);
+             runtimes.push_back(runtime);
+         }
+@@ -1915,11 +1918,17 @@ static std::vector<ggml_backend_cuda_kv_stream_runtime_t> ggml_cuda_kv_stream_pr
+         if (node->op != GGML_OP_FLASH_ATTN_EXT || !ggml_cuda_kv_stream_fattn_fits(node)) {
+             continue;
+         }
++        ++fa_fits;
+         auto * runtime = ggml_cuda_kv_stream_runtime_from_tensor(node->src[1]);
+         (void) ggml_cuda_kv_stream_graph_add_attention(
+             runtime->transfer_ring, runtime->resident_cache, node);
+     }
+ 
++    if (getenv("LLAMA_KV_STREAM_TRACE")) {
++        GGML_LOG_WARN("%s: fa=%d rt=%d fits=%d runtimes=%zu\n", __func__,
++            fa_total, fa_runtime, fa_fits, runtimes.size());
++    }
++
+     for (auto * runtime : runtimes) {
+         ggml_cuda_kv_stream_graph_finalize(runtime->transfer_ring, compute_stream);
+     }
+@@ -5219,6 +5228,10 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+         CUDA_CHECK(cudaStreamBeginCapture(cuda_ctx->stream(), cudaStreamCaptureModeRelaxed));
+     }
+ 
++    if (getenv("LLAMA_KV_STREAM_TRACE")) {
++        GGML_LOG_WARN("%s: ucg=%d upd=%d nodes=%d\n", __func__,
++            int(use_cuda_graph), int(cuda_graph_update_required), cgraph->n_nodes);
++    }
+     ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
+ 
+     return GGML_STATUS_SUCCESS;
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index da4d65cdb..4a06eb164 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -88,6 +88,14 @@ llama_kv_cache::llama_kv_cache(
+     v_cells_impl(other ? other->v_cells_impl : std::make_shared<llama_kv_cells_vec>()),
+     v_cells(*v_cells_impl) {
+ 
++    if (getenv("LLAMA_KV_STREAM_DBG")) {
++        static int kvdbg_inst = 0;
++        LLAMA_LOG_WARN("kvdbg: ctor #%d model=%p kv_size=%u n_layer=%u n_pad=%u stage_bytes=%zu other=%d no_alloc=%d type_k=%s type_v=%s il0dev=%s il3dev=%s\n",
++            ++kvdbg_inst, (const void *) &model, kv_size, hparams.n_layer_all, n_pad, kv_stream_stage_bytes, other != nullptr,
++            (int) hparams.no_alloc, ggml_type_name(type_k), ggml_type_name(type_v),
++            ggml_backend_dev_name(model.dev_layer(0)), ggml_backend_dev_name(model.dev_layer(3)));
++    }
++
+     // shared cells view the source cache's K/V tensors, so the cell count
+     // follows the source allocation: a fitted target can be smaller than the
+     // draft default and oversized views would overflow the source tensors
+@@ -233,6 +241,10 @@ llama_kv_cache::llama_kv_cache(
+             dev_name = ggml_backend_dev_name(dev);
+ 
+             if (kv_stream_stage_bytes != 0 && !hparams.no_alloc) {
++                if (getenv("LLAMA_KV_STREAM_DBG")) {
++                    LLAMA_LOG_WARN("kvdbg: layer il=%u has_kv=%d is_recr=%d offload=%d dev=%s\n",
++                        il, (int) hparams.has_kv(il), (int) hparams.is_recr(il), (int) offload, dev_name);
++                }
+                 if (kv_stream_dev != nullptr && kv_stream_dev != dev) {
+                     throw std::runtime_error("block KV streaming requires every attention layer on one CUDA device");
+                 }
+@@ -286,10 +298,22 @@ llama_kv_cache::llama_kv_cache(
+                             repartition_fn == nullptr || decode_layout_fn == nullptr ||
+                             reconfigure_fn == nullptr ||
+                             mark_dirty_rows_fn == nullptr) {
++                        if (getenv("LLAMA_KV_STREAM_DBG")) {
++                            LLAMA_LOG_WARN("kvdbg: NULL-proc trigger il=%u offload=%d dev_name=%s reg=%s type_pair=%d page=%d ws=%d rt_new=%d rt_free=%d buft=%d fb=%d span=%d repart=%d dl=%d reconf=%d dirty=%d\n",
++                                il, (int) offload, dev_name, ggml_backend_reg_name(reg),
++                                type_pair_supported_fn != nullptr, page_bytes_fn != nullptr, workspace_bytes_fn != nullptr,
++                                runtime_new_fn != nullptr, runtime_free_fn != nullptr, buffer_type_fn != nullptr,
++                                feedback_fn != nullptr, span_feedback_fn != nullptr, repartition_fn != nullptr,
++                                decode_layout_fn != nullptr, reconfigure_fn != nullptr, mark_dirty_rows_fn != nullptr);
++                        }
+                         throw std::runtime_error("block KV streaming requires the CUDA backend");
+                     }
+ 
+                     if (!type_pair_supported_fn(type_k, type_v)) {
++                        if (getenv("LLAMA_KV_STREAM_DBG")) {
++                            LLAMA_LOG_WARN("kvdbg: type_pair unsupported il=%u dev_name=%s type_k=%s type_v=%s\n",
++                                il, dev_name, ggml_type_name(type_k), ggml_type_name(type_v));
++                        }
+                         throw std::runtime_error(
+                             "block KV streaming does not support K " + std::string(ggml_type_name(type_k)) +
+                             " and V " + ggml_type_name(type_v));
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index f78cfb36d..0add3527c 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1101,6 +1101,11 @@ private:
+         model_tgt = llama_init->model();
+         ctx_tgt   = llama_init->context();
+ 
++        if (getenv("LLAMA_KV_STREAM_DBG") && model_tgt) {
++            SRV_WRN("kvdbg: model_tgt=%p n_gpu_layers_param=%d n_layer=%d\n",
++                (const void *) model_tgt, params_base.n_gpu_layers, llama_model_n_layer(model_tgt));
++        }
++
+         if (model_tgt == nullptr) {
+             SRV_ERR("failed to load model, '%s'\n", params_base.model.path.c_str());
+             return false;

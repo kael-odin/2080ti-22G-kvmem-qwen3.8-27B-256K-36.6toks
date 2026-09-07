@@ -87,6 +87,13 @@ python tools\run_case.py ^
 | 170K | 固定 | 377.65 | 25.50 | **69 MiB——危险** |
 | 262K | 流式(1,024 MiB池) | 205.76 | **3.08** | 2.30 GiB |
 
+> **⚠️ 头号坑 —— `--fit` 默认开启，显存预算超限时（262K + draft-MTP 就会触发）
+> 会静默把注意力层降级到 CPU；KV 流式要求所有注意力层在同一 CUDA 设备上，
+> 于是启动报出误导性的 `block KV streaming requires the CUDA backend`。
+> **修复：加 `--fit off`**（2080 Ti 22G 实测：262144 + draft-MTP + q5_1 KV + 视觉
+> 全通过，显存 21.8/22.5 GiB，MTP acceptance 0.61，短程 37.5 t/s）。
+> 完整踩坑手册：[docs/troubleshooting-zh.md](docs/troubleshooting-zh.md)。
+>
 **一句话：** 固定 KV 装得下时，解码更快；**装不下时才用流式**——而要在 22G 卡上跑到 262K，**流式是唯一办法**。
 
 **常驻边界实测（UD-IQ4_XS，q5_1 KV，3,072 MiB 池，2026-09-06）：** 一个 135,087-token 的请求跨过常驻分区（trace：resident pages 511→510，ring slots 16→32），标记精确找回，decode 9.64 t/s（prefill 226.4 t/s）。在常驻池内（≤ ~13 万 token）decode 保持 30–42 t/s。细节与限制见[运维报告](docs/ops-stability-optimization-report.md)。
