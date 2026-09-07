@@ -91,6 +91,8 @@ python tools\run_case.py ^
 
 **常驻边界实测（UD-IQ4_XS，q5_1 KV，3,072 MiB 池，2026-09-06）：** 一个 135,087-token 的请求跨过常驻分区（trace：resident pages 511→510，ring slots 16→32），标记精确找回，decode 9.64 t/s（prefill 226.4 t/s）。在常驻池内（≤ ~13 万 token）decode 保持 30–42 t/s。细节与限制见[运维报告](docs/ops-stability-optimization-report.md)。
 
+**2026-09-07 更新——q5_1 KV 必须带 `GGML_CUDA_FA_ALL_QUANTS=ON`（官方标准构建会 CPU 回退）：** 用这一个 CMake 开关重建官方 b10816（源码零改动）后，fixed q5_1 获得 GPU 注意力内核，**135K 全场最快**：decode 23.8 t/s（流式 9.2–10.2、fixed q4_0 18.6），prefill 339.8（峰值 412）。日常配置验收（TURBO-Fable，-c 174080，q5_1，ub256）：decode 24.8–26.2、标记精确、1024px 视觉正常、显存峰值 22.13G 无 OOM。结论：**≤ ~18 万上下文用 fixed q5_1（带该开关）；流式退居 >18 万档（262K）**——流式 9.5 t/s 的代价来自逐层部分归并/尾页机制，而非注意力本身。详见[运维报告](docs/ops-stability-optimization-report.md)第十节。
+
 *(其他配置（含 GSQ-RCO、Q8_0/Q8_0 对照）见 [`results/benchmark-summary.csv`](results/benchmark-summary.csv) 和 [`docs/report-zh.md`](docs/report-zh.md)。)*
 
 ---
