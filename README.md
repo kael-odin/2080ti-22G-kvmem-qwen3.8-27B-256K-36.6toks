@@ -1,4 +1,30 @@
-# 🚀 KV-Streaming for RTX 2080 Ti (sm_75): Run 260K Context on a 22 GB Card
+# 🚀 RTX 2080 Ti 22G (sm_75) Long-Context Lab: KVMem headline + KV-streaming archive
+
+**260K-token context on a 22 GB card — two approaches, both verified on the same GPU.**
+
+> **Headline · [KVMem](https://github.com/kvmem/kvmem-llama.cpp) (retrieval-based long context)**: this repo ships its Turing / sm_75 / Windows port with **public measured numbers** — Qwen3.8-27B IQ3_S + MTP (58.6% acceptance) + vision + 262K context + q8_0 KV at **36.6 tok/s decode**, faster than the upstream author's RTX 5060 Ti (31.7 tok/s) and **3–4×** the streaming route below after its 135K resident boundary (9.6 tok/s).
+> Build script, patches and test tools: **[kvmem/](kvmem/README.md)** · full port log: [Windows/sm_75 port report](docs/kvmem-windows-port-zh.md) (Chinese).
+
+## Which long-context route when (measured on the same 22 GB card)
+
+| | KV streaming (archived, lossless) | **KVMem (headline, retrieval)** |
+|---|---|---|
+| 260K-token context | ✅ exact needle at 262K | ✅ verified at 262K |
+| Long-context decode | 30–42 tok/s inside the resident pool, **~9.6 tok/s past 135K** | **constant ~36.6 tok/s** |
+| Attention coverage | **entire history (lossless)** | retrieved window (approximate, near-lossless on benchmarks) |
+| Best at | exact full-document synthesis: summaries, cross-document fact comparison | everyday long agent conversations, multi-turn tool work |
+
+**In one line:** KVMem trades "slower as it grows" for "retrieval can miss a block"; switch back to streaming when you need **exact full-document synthesis**.
+
+## Upstream status (researched 2026-09-28)
+
+- Since **v0.16.0-rc3**, the official KVMem Windows prebuilt covers RTX 20/30/40/50 compile targets (sm_75 included) — but it was only physically tested on an RTX 5060 Ti; **the Turing numbers here remain the only published ones**.
+- **v0.16.0-rc3-prism.3** (experimental): an RTX 20-series prebuilt package for the Ternary Bonsai 2 27B model (CUDA 12.9, zero build).
+- **v0.17.0** tag exists, release not yet published: session NVMe/disk cache, multi-conversation host KV, multi-GPU layer split + MTP, OpenAI Responses API.
+
+---
+
+## Archived route · KV-Streaming for RTX 2080 Ti (sm_75): Run 260K Context on a 22 GB Card
 
 **跑超大上下文，不需要超大显存。** This repo makes [adaptive KV streaming](https://github.com/RaymondHuang210129/llama.cpp-adaptive-kv-streaming) work on **RTX 2080 Ti / Turing (sm_75)** — a 2018, 22 GB GPU — so you can serve a **260,000-token context** with a **27B model** that would otherwise need a 40GB+ card.
 
@@ -140,10 +166,10 @@ Non-Turing hardware keeps the original unchanged path.
 
 ## 7 License & thanks
 
-MIT (see [LICENSE](LICENSE)). The adaptive KV implementation originates from **RaymondHuang210129's** [llama.cpp-adaptive-kv-streaming](https://github.com/RaymondHuang210129/llama.cpp-adaptive-kv-streaming), subject to upstream llama.cpp's MIT. GSQ/RCO models have their own licenses; **no weights are redistributed**.
+MIT (see [LICENSE](LICENSE)). The adaptive KV implementation originates from **RaymondHuang210129's** [llama.cpp-adaptive-kv-streaming](https://github.com/RaymondHuang210129/llama.cpp-adaptive-kv-streaming); the KVMem implementation originates from [kvmem/kvmem-llama.cpp](https://github.com/kvmem/kvmem-llama.cpp) (see that repository for its licensing). GSQ/RCO models have their own licenses; **no weights are redistributed**.
 
 **中文版:** 见 [README_zh-CN.md](README_zh-CN.md).
 
 ---
 
-*RTX 2080 Ti · sm_75 · adaptive KV streaming · 22GB VRAM · 260K context · Qwen 3.8 · speculative MTP decode · long-context inference · llama.cpp Turing port*
+*RTX 2080 Ti · sm_75 · KVMem · adaptive KV streaming · 22GB VRAM · 260K context · Qwen 3.8 · speculative MTP decode · long-context inference · llama.cpp Turing port*

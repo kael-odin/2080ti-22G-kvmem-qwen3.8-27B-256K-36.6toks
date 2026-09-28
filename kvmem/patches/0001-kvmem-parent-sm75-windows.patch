@@ -1,0 +1,139 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index dd10659..ecd47ee 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -58,11 +58,19 @@ if (KVMEM_BUILD_LLAMA)
+     target_compile_features(llama-kvmem-server PRIVATE cxx_std_17)
+ 
+     # Run manually with an MTP GGUF path; no model is downloaded by CTest.
+-    add_executable(kvmem-mtp-kv-test tests/mtp-kv-test.cpp tools/kvmem-spec.cpp)
+-    target_include_directories(kvmem-mtp-kv-test PRIVATE src/adapter tools llama.cpp/src)
+-    target_link_libraries(kvmem-mtp-kv-test PRIVATE llama llama-common kvmem)
+-    add_test(NAME kvmem-mtp-kv-test COMMAND kvmem-mtp-kv-test)
+-    set_tests_properties(kvmem-mtp-kv-test PROPERTIES SKIP_RETURN_CODE 77)
++    #
++    # Windows: this target is skipped. It drives llama.cpp internals directly
++    # (llama_batch_allocr, llama_kv_cache::type_k, ...). Those are not part of
++    # the public API, so they are not exported from llama.dll and the link
++    # fails with LNK2019. On Linux all symbols are exported by default and the
++    # test links fine. Local addition - not upstream.
++    if (NOT WIN32)
++        add_executable(kvmem-mtp-kv-test tests/mtp-kv-test.cpp tools/kvmem-spec.cpp)
++        target_include_directories(kvmem-mtp-kv-test PRIVATE src/adapter tools llama.cpp/src)
++        target_link_libraries(kvmem-mtp-kv-test PRIVATE llama llama-common kvmem)
++        add_test(NAME kvmem-mtp-kv-test COMMAND kvmem-mtp-kv-test)
++        set_tests_properties(kvmem-mtp-kv-test PROPERTIES SKIP_RETURN_CODE 77)
++    endif()
+ 
+     add_executable(kvmem-gdn-replay-test tests/gdn-replay-test.cpp)
+     target_link_libraries(kvmem-gdn-replay-test PRIVATE ggml)
+diff --git a/kvmem/CMakeLists.txt b/kvmem/CMakeLists.txt
+index 8aebc42..d624546 100644
+--- a/kvmem/CMakeLists.txt
++++ b/kvmem/CMakeLists.txt
+@@ -1,9 +1,29 @@
++# Windows: force kvmem to be a STATIC library.
++#
++# The kvmem headers carry no __declspec(dllexport/dllimport) annotations, which
++# is fine on Linux (shared objects export everything by default). MSVC however
++# exports nothing, produces NO import library, and the subsequent
++# `llama.dll` link then fails with
++#     LINK : fatal error LNK1181: cannot open input file 'kvmem\kvmem.lib'
++# Building kvmem statically pulls the objects straight into llama.dll and
++# sidesteps the export/import problem entirely. Linux behaviour is unchanged.
++#
++# Local addition - not part of upstream kvmem.
++if (WIN32)
++    set(_kvmem_saved_build_shared ${BUILD_SHARED_LIBS})
++    set(BUILD_SHARED_LIBS OFF)
++endif()
++
+ add_library(kvmem
+     src/host/kvmem_store.cpp
+     src/host/kvmem_runtime.cpp
+     src/host/raw_kv_store.cpp
+     src/host/rope.cpp
+ )
++
++if (WIN32)
++    set(BUILD_SHARED_LIBS ${_kvmem_saved_build_shared})
++endif()
+ set_target_properties(kvmem PROPERTIES POSITION_INDEPENDENT_CODE ON)
+ target_include_directories(kvmem PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+ target_compile_features(kvmem PUBLIC cxx_std_17)
+diff --git a/kvmem/include/kvmem/nvme_kv_tier.hpp b/kvmem/include/kvmem/nvme_kv_tier.hpp
+index 2cd5835..15cacd6 100644
+--- a/kvmem/include/kvmem/nvme_kv_tier.hpp
++++ b/kvmem/include/kvmem/nvme_kv_tier.hpp
+@@ -24,9 +24,15 @@
+ #include <utility>
+ #include <vector>
+ 
++#if defined(_WIN32)
++// Windows/MSVC: no <unistd.h>, no pread/pwrite, text-mode default.
++// kvmem_win_compat.h supplies the missing pieces. Local addition, not upstream.
++#include "kvmem_win_compat.h"
++#else
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <unistd.h>
++#endif
+ 
+ namespace kvmem {
+ 
+diff --git a/kvmem/tests/kvmem_runtime_test.cpp b/kvmem/tests/kvmem_runtime_test.cpp
+index 4cc9303..dbb0604 100644
+--- a/kvmem/tests/kvmem_runtime_test.cpp
++++ b/kvmem/tests/kvmem_runtime_test.cpp
+@@ -5,7 +5,11 @@
+ #include <cstring>
+ #include <map>
+ #include <string>
++#if defined(_WIN32)
++#include "kvmem/kvmem_win_compat.h"  // local addition: see that header
++#else
+ #include <unistd.h>
++#endif
+ #include <vector>
+ 
+ using namespace kvmem;
+diff --git a/kvmem/tests/nvme_kv_tier_test.cpp b/kvmem/tests/nvme_kv_tier_test.cpp
+index 1f3dd52..ad773ac 100644
+--- a/kvmem/tests/nvme_kv_tier_test.cpp
++++ b/kvmem/tests/nvme_kv_tier_test.cpp
+@@ -11,7 +11,11 @@
+ #include <string>
+ #include <vector>
+ 
++#if defined(_WIN32)
++#include "kvmem/kvmem_win_compat.h"  // local addition: see that header
++#else
+ #include <unistd.h>
++#endif
+ 
+ using namespace kvmem;
+ 
+diff --git a/llama.cpp b/llama.cpp
+--- a/llama.cpp
++++ b/llama.cpp
+@@ -1 +1 @@
+-Subproject commit b81c99b479d4c24e5eeca10de99032ebd343ef8f
++Subproject commit b81c99b479d4c24e5eeca10de99032ebd343ef8f-dirty
+diff --git a/tools/llama-kvmem-cli.cpp b/tools/llama-kvmem-cli.cpp
+index e9f189e..5b4f078 100644
+--- a/tools/llama-kvmem-cli.cpp
++++ b/tools/llama-kvmem-cli.cpp
+@@ -293,7 +293,13 @@ int main(int argc, char ** argv) {
+             kparams.nvme_dir = nvme_dir.c_str();
+         }
+         if (dump_kv) {
++            // Windows has no setenv(); MSVC's _putenv_s always overwrites,
++            // which matches the POSIX call's overwrite=1 semantics.
++#if defined(_WIN32)
++            _putenv_s("KVMEM_DUMP_CAPTURE", "1");
++#else
+             setenv("KVMEM_DUMP_CAPTURE", "1", 1);
++#endif
+         }
+         if (query_last > 0 && n_prompt > 0) {
+             const int last = std::min(query_last, n_prompt);
