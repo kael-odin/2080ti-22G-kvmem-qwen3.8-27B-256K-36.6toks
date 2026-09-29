@@ -110,7 +110,7 @@ scripts\package-sm75.bat          :: 打包服务器 + DLL
 ## 📁 仓库结构（一目了然）
 
 ```text
-2080ti-22G-long-context/
+2080ti-22G-kvmem-qwen3.8-27B-256K-36.6toks/
 ├─ README.md              ← 本文件（中文主文档）
 ├─ README_EN.md           ← English version
 ├─ kvmem/                 ★ 主线：KVMem 移植
