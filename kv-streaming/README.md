@@ -1,32 +1,8 @@
-# 🚀 RTX 2080 Ti 22G（sm_75）长上下文工场：KVMem 主线 + KV 流式备档
+# 🚀 KV 流式 for RTX 2080 Ti (sm_75)：22G 显存跑 26 万上下文（备档 · 无损路线）
 
-**22G 显存跑 26 万上下文——两条路线，在同一张卡上全部实测跑通。**
+> 本目录是 **KV 流式（adaptive KV streaming）** 方案的完整档案：sm_75 补丁、构建脚本、实测数据与踩坑手册。它是根 README 中 **KVMem 主线**的互补备档——当任务需要**无损全量注意力**（全文精确综合）时用这条路线。**跑超大上下文，不需要超大显存。**
 
-> **主线 · [KVMem](https://github.com/kvmem/kvmem-llama.cpp)（检索式长上下文）**：本仓提供它在 Turing / sm_75 / Windows 上的**移植与公开实测**——Qwen3.8-27B IQ3_S + MTP（接受率 58.6%）+ 视觉 + 262K 上下文 + q8_0 KV，**decode 36.6 tok/s**，比上游作者的 RTX 5060 Ti（31.7 tok/s）更快，是流式方案越过 135K 常驻边界后（9.6 tok/s）的 **3–4 倍**。
-> 构建脚本、补丁、测试工具见 **[kvmem/](kvmem/README.md)**；踩坑全记录见 [《KVMem Windows / sm_75 移植与验证》](docs/kvmem-windows-port-zh.md)。
-
-## 两种长上下文路线怎么选（同一张 22G 卡实测）
-
-| | KV 流式（备档，无损） | **KVMem（主线，检索式）** |
-|---|---|---|
-| 26 万 token 上下文 | ✅ 262K needle 精确通过 | ✅ 262K 实测通过 |
-| 长上下文 decode | 常驻区内 30–42 tok/s，**越过 135K 后 ~9.6 tok/s** | **恒定 ~36.6 tok/s** |
-| 注意力覆盖 | **全部历史（无损）** | 检索窗口（近似，benchmark 级 near-lossless） |
-| 适用场景 | 全文精确综合：总结全文、对比散落 200K 各处的事实 | 日常 agent 长对话、工具型多轮任务（检索命中率的甜点区） |
-
-**一句话**：KVMem 把"越长越慢"换成了"检索可能漏块"；要**全文精确综合**时，切回下面的流式备档方案。
-
-## 上游动态（2026-09-28 调研）
-
-- **v0.16.0-rc3 起，KVMem 官方 Windows 预编译已覆盖 RTX 20/30/40/50 编译目标**（含 sm_75 代码），但官方仅在 RTX 5060 Ti 上实机验证——**Turing 实测数据本仓仍是独一份**。
-- **v0.16.0-rc3-prism.3（实验版）**：为 Ternary Bonsai 2 27B 模型提供 RTX 20 系预编译包（CUDA 12.9，免编译试玩）。
-- **v0.17.0 tag 已打、正式 release 未发**：新增会话 NVMe/磁盘缓存、多对话 host KV 常驻、多卡层切分 + MTP、OpenAI Responses API 等。
-
----
-
-## 备档路线 · KV 流式 for RTX 2080 Ti (sm_75)：22G 显存跑 26 万上下文
-
-**跑超大上下文，不需要超大显存。** 本仓库让 [adaptive KV streaming](https://github.com/RaymondHuang210129/llama.cpp-adaptive-kv-streaming) 在 **RTX 2080 Ti（Turing / sm_75，2018 年的老卡，22G 显存）** 上真正可用——用 27B 模型跑到 **26 万 token 上下文**，而这原本需要 40G 以上显存。
+本方案让 [adaptive KV streaming](https://github.com/RaymondHuang210129/llama.cpp-adaptive-kv-streaming) 在 **RTX 2080 Ti（Turing / sm_75，2018 年的老卡，22G 显存）** 上真正可用——用 27B 模型跑到 **26 万 token 上下文**，而这原本需要 40G 以上显存。
 
 > **一句话原理：** 推理时显存不够装 KV 缓存，上下文就断了。KV 流式把"记忆(KV 缓存)"**按需搬到系统内存(RAM)**，显存保留一块常驻池、其余分页从 RAM 流式拉取。上下文上限从 ~5 万拉到 26 万。
 
@@ -36,9 +12,9 @@
 
 **每一个小显存玩家的痛：** 模型塞得下，但**长文档的 KV 缓存塞不下**。27B 模型 + 26万 token 的 KV 需要 **~29G**，22G 卡根本装不下。
 
-**这个仓库的解法：** adaptive KV streaming——KV 的"后备存储"放在**系统内存**，显存只留一小块 staging 池。你在**同一张卡**上把上下文拉到 **~4.7 倍**。
+**这个方案的解法：** adaptive KV streaming——KV 的"后备存储"放在**系统内存**，显存只留一小块 staging 池。你在**同一张卡**上把上下文拉到 **~4.7 倍**。
 
-| | 固定 KV（旧办法） | **本仓库：KV 流式** |
+| | 固定 KV（旧办法） | **本方案：KV 流式** |
 |---|---|---|
 | 22G 卡最大上下文 | ~5.3 万 token ❌ | **~26.2 万 token ✅** |
 | 生成速度 | 快 | **常驻区内 30–42 tok/s；越过 135K 常驻边界后约 9.6 tok/s** |
@@ -58,7 +34,7 @@
 | "sm_75 支持是上游没有的" | ✅ **是（修了 2 个真崩溃）** |
 | "22G 卡在上下文上能比 40G 卡" | ✅ 仅指**上下文长度**，不包括速度 |
 
-**真正新的是：** 一套 **开箱即用的补丁 + 实测报告**，让 KV 流式在**最老的 sm_75 Turing 卡**上跑起来，并用数据证明。如果你有 2080 Ti / 2070 / 2060 这些 Turing 卡，觉得"长上下文和我无关"——这个仓库就是答案。
+**真正新的是：** 一套 **开箱即用的补丁 + 实测报告**，让 KV 流式在**最老的 sm_75 Turing 卡**上跑起来，并用数据证明。如果你有 2080 Ti / 2070 / 2060 这些 Turing 卡，觉得"长上下文和我无关"——这套方案就是答案。
 
 ---
 
@@ -146,7 +122,7 @@ CUDA error: invalid argument
 
 非 Turing 卡保持上游原路径不变。
 
-**合并到最新上游 b10816（2026-09-05）：** 真正的三方合并（晚了 366 个 commit），保留上游新加的 sparse-attention 路径。见 [`补丁/0002-merge-adaptive-kv-into-b10816-sm75.patch`](patches/0002-merge-adaptive-kv-into-b10816-sm75.patch) + [`docs/b10816-merge-notes-zh.md`](docs/b10816-merge-notes-zh.md)。
+**合并到最新上游 b10816（2026-09-05）：** 真正的三方合并（晚了 366 个 commit），保留上游新加的 sparse-attention 路径。见 [`patches/0002-merge-adaptive-kv-into-b10816-sm75.patch`](patches/0002-merge-adaptive-kv-into-b10816-sm75.patch) + [`docs/b10816-merge-notes-zh.md`](docs/b10816-merge-notes-zh.md)。
 
 ---
 
@@ -163,10 +139,10 @@ CUDA error: invalid argument
 
 ## 7 许可与致谢
 
-MIT（见 [LICENSE](LICENSE)）。adaptive KV 实现源自 **RaymondHuang210129** 的 [llama.cpp-adaptive-kv-streaming](https://github.com/RaymondHuang210129/llama.cpp-adaptive-kv-streaming)；KVMem 实现源自 [kvmem/kvmem-llama.cpp](https://github.com/kvmem/kvmem-llama.cpp)（遵循其仓库声明之许可）。GSQ/RCO 模型有各自许可；**本仓库不分发模型权重**。
+MIT（见 [LICENSE](../LICENSE)）。adaptive KV 实现源自 **RaymondHuang210129** 的 [llama.cpp-adaptive-kv-streaming](https://github.com/RaymondHuang210129/llama.cpp-adaptive-kv-streaming)，遵循上游 llama.cpp 的 MIT。GSQ/RCO 模型有各自许可；**本仓库不分发模型权重**。
 
-**English:** see [README.md](README.md).
+**English:** see [README_EN.md](README_EN.md). · **主线方案（KVMem）:** [根 README](../README.md)
 
 ---
 
-*RTX 2080 Ti · sm_75 · KVMem · adaptive KV streaming · 22GB 显存 · 26万上下文 · Qwen 3.8 · MTP 投机解码 · 长文本推理 · llama.cpp Turing 移植*
+*RTX 2080 Ti · sm_75 · adaptive KV streaming · 22GB 显存 · 26万上下文 · Qwen 3.8 · MTP 投机解码 · 长文本推理 · llama.cpp Turing 移植*
